@@ -14,8 +14,8 @@ const emailSchema = new mongoose.Schema({
     default: 'No Subject'
   },
   body: {
-    type: String,
-    required: true
+     type: String,
+    default: ""
   },
   receivedAt: {
     type: Date,
