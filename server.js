@@ -139,7 +139,7 @@ const { router: authRoutes, ensureDefaultAdmin } = require('./routes/authRoutes'
 const emailService = require('./services/emailService');
 const { authenticate } = require('./middleware/auth');
 const redisService = require('./services/redisService');
-
+// Server startup log updated
 // Public routes (no authentication required)
 app.use('/api/auth', authRoutes);
 
