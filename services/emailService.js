@@ -33,11 +33,9 @@ const imapConfig = {
     tlsOptions: { rejectUnauthorized: false },
     authTimeout: 20000, // 20 seconds for authentication
     connTimeout: 20000, // 20 seconds for connection
-    keepalive: {
-      interval: 10000, // Send keepalive every 10 seconds
-      idleInterval: 300000, // 5 minutes
-      forceNoop: true // Force NOOP command
-    },
+    keepalive: false,
+    authTimeout: 10000,
+    connTimeout: 10000
     autotls: 'always' // Always use TLS
   }
 };
@@ -888,62 +886,21 @@ async function startMonitoring(io) {
       isMonitoring = false;
     });
     
-    await connection.openBox('INBOX');
+    await connection.openBox('INBOX',true);
     console.log('✅ Connected to IMAP server successfully');
     
     isMonitoring = true;
+    const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
-    // Check for new emails every 10 seconds
     const checkInterval = setInterval(async () => {
-      if (!isMonitoring || !connection) {
-        clearInterval(checkInterval);
-        return;
-      }
-      
+      if (!isMonitoring || !connection) return;
+    
       try {
-        await connection.openBox('INBOX');
         await processEmail(connection, io);
-      } catch (error) {
-        console.error('❌ Error in email check interval:', error.message);
-        console.error('   Code:', error.code);
-        
-        // Handle connection reset errors
-        if (error.code === 'ECONNRESET' || error.message.includes('ECONNRESET')) {
-          console.log('🔄 IMAP connection reset, attempting to reconnect...');
-          isMonitoring = false;
-          try {
-            if (connection) {
-              connection.removeAllListeners();
-              await connection.end();
-            }
-          } catch (e) {
-            // Ignore errors when closing
-          }
-          
-          // Reconnect after a delay
-          setTimeout(() => {
-            startMonitoring(io).catch(err => {
-              console.error('❌ Reconnection failed:', err.message);
-            });
-          }, 10000); // Retry after 10 seconds
-        } else {
-          // For other errors, try to reconnect immediately
-          try {
-            if (connection) {
-              connection.removeAllListeners();
-              await connection.end();
-            }
-            connection = await imap.connect(imapConfig);
-            await connection.openBox('INBOX');
-            console.log('✅ Reconnected to IMAP server');
-            isMonitoring = true;
-          } catch (reconnectError) {
-            console.error('❌ Reconnection failed:', reconnectError.message);
-            isMonitoring = false;
-          }
-        }
+      } catch (err) {
+        console.error('❌ Scheduled email check failed:', err.message);
       }
-    }, 10000); // Check every 10 seconds
+    }, CHECK_INTERVAL);
 
     // Listen for new emails in real-time
     connection.on('mail', async () => {
