@@ -69,8 +69,6 @@ console.log('🔄 Attempting to connect to MongoDB...');
 const maskedURI = MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
 console.log(`   URI: ${maskedURI}`);
 
-mongoose.set('bufferCommands', false);
-
 mongoose.connect(MONGODB_URI, {
   serverSelectionTimeoutMS: 10000,
   socketTimeoutMS: 45000,
@@ -82,7 +80,6 @@ mongoose.connect(MONGODB_URI, {
   console.log('✅ MongoDB Connected successfully');
   console.log(`   Database: ${mongoose.connection.name}`);
   console.log(`   Host: ${mongoose.connection.host}:${mongoose.connection.port}`);
-  mongoose.set('bufferCommands', true);
 
   // Ensure a default admin exists after successful DB connection
   try {
@@ -90,6 +87,18 @@ mongoose.connect(MONGODB_URI, {
   } catch (e) {
     console.error('Error invoking ensureDefaultAdmin:', e);
   }
+
+  // Start background services only after successful DB connection
+  console.log('🚀 Starting background services...');
+  
+  // Start email monitoring
+  emailService.startMonitoring(io);
+
+  // Initialize birthday checker task
+  smsService.initBirthdayTask();
+
+  // Start Redis queue processor
+  startQueueProcessor();
 })
 .catch(err => {
   console.error('\n❌ MongoDB connection FAILED!');
@@ -121,12 +130,10 @@ mongoose.connection.on('error', (err) => {
 
 mongoose.connection.on('disconnected', () => {
   console.warn('⚠️  MongoDB disconnected. Attempting to reconnect...');
-  mongoose.set('bufferCommands', false);
 });
 
 mongoose.connection.on('reconnected', () => {
   console.log('✅ MongoDB reconnected');
-  mongoose.set('bufferCommands', true);
 });
 
 mongoose.connection.on('connecting', () => {
@@ -192,12 +199,6 @@ redisService.initializeRedis().then(() => {
   console.warn('⚠️  Redis initialization failed, continuing without Redis:', err.message);
 });
 
-// Start email monitoring
-emailService.startMonitoring(io);
-
-// Initialize birthday checker task
-smsService.initBirthdayTask();
-
 // Start Redis queue processor (processes jobs from queue)
 async function startQueueProcessor() {
   const queueName = 'pdf_processing_queue';
@@ -220,12 +221,13 @@ async function startQueueProcessor() {
   }, 5000); // Check queue every 5 seconds
 }
 
-// Start queue processor
-startQueueProcessor();
-
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'Server is running', timestamp: new Date() });
+  res.json({ 
+    status: 'Server is running', 
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    timestamp: new Date() 
+  });
 });
 
 const PORT = process.env.PORT || 5000;
