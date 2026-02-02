@@ -6,8 +6,12 @@ const fs = require('fs-extra');
 const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
 const { extractResumeData } = require('../services/pdfParser');
-const Email = require('../models/Resume'); // Model is renamed to Email but file is still Resume.js
-const cloudinary = require('../config/cloudinary');
+const graphService = require('../services/graphService');
+const Email = require('../models/Resume');
+const { s3Client, bucketName } = require('../config/s3');
+const { Upload } = require("@aws-sdk/lib-storage");
+const { GetObjectCommand } = require("@aws-sdk/client-s3");
+const { streamToBuffer } = require('../utils/streamUtils'); // I'll need to create this or use a simple implementation
 
 // Configure multer for file uploads
 const uploadsDir = path.join(__dirname, '../uploads');
@@ -42,6 +46,34 @@ const upload = multer({
 const getIO = (req) => {
   return req.app.get('io');
 };
+
+// Outlook OAuth2 Routes
+router.get('/login', async (req, res) => {
+  try {
+    const url = await graphService.getAuthUrl();
+    res.redirect(url);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('No code provided');
+
+  try {
+    const email = await graphService.redeemCode(code);
+    res.send(`
+      <div style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+        <h1 style="color: #28a745;">✅ Authorization Successful!</h1>
+        <p>Outlook account <b>${email}</b> is now connected to ResumeExtractor.</p>
+        <p>You can close this window now.</p>
+      </div>
+    `);
+  } catch (error) {
+    res.status(500).send(`Error: ${error.message}`);
+  }
+});
 
 // Get all emails
 router.get('/', async (req, res) => {
@@ -90,11 +122,11 @@ async function processUploadedResume(file, req) {
   // Read PDF file
   const pdfBuffer = await fs.readFile(file.path);
   
-  // STEP 1: Upload PDF to Cloudinary FIRST
-  console.log('☁️  Step 1: Uploading PDF to Cloudinary...');
-  let cloudinaryResult = null;
-  let cloudinaryUrl = null;
-  let cloudinaryPublicId = null;
+  // STEP 1: Upload PDF to AWS S3 FIRST
+  console.log('☁️  Step 1: Uploading PDF to AWS S3...');
+  let s3Result = null;
+  let s3Url = null;
+  let s3Key = null;
   
   try {
     const timestamp = Date.now();
@@ -102,40 +134,28 @@ async function processUploadedResume(file, req) {
       .replace(/[^a-zA-Z0-9.-]/g, '_')
       .replace(/\s+/g, '_');
     
-    const cloudinaryFilename = `resumes/${timestamp}_${sanitizedFilename}`;
+    s3Key = `resumes/${timestamp}_${sanitizedFilename}`;
     
-    // Upload to Cloudinary
-    cloudinaryResult = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          resource_type: 'raw',
-          folder: 'resumes',
-          public_id: cloudinaryFilename.replace('.pdf', ''),
-          format: 'pdf',
-          use_filename: true,
-          unique_filename: true
-        },
-        (error, result) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve(result);
-          }
-        }
-      );
-      
-      uploadStream.end(pdfBuffer);
+    // Upload to S3
+    const upload = new Upload({
+      client: s3Client,
+      params: {
+        Bucket: bucketName,
+        Key: s3Key,
+        Body: pdfBuffer,
+        ContentType: 'application/pdf',
+      },
     });
+
+    s3Result = await upload.done();
+    s3Url = s3Result.Location;
     
-    cloudinaryUrl = cloudinaryResult.secure_url || cloudinaryResult.url;
-    cloudinaryPublicId = cloudinaryResult.public_id;
+    console.log('✅ PDF uploaded to AWS S3 successfully!');
+    console.log(`   URL: ${s3Url}`);
+    console.log(`   Key: ${s3Key}`);
     
-    console.log('✅ PDF uploaded to Cloudinary successfully!');
-    console.log(`   URL: ${cloudinaryUrl}`);
-    console.log(`   Public ID: ${cloudinaryPublicId}`);
-    
-  } catch (cloudinaryError) {
-    console.error(`❌ Cloudinary upload failed: ${cloudinaryError.message}`);
+  } catch (s3Error) {
+    console.error(`❌ AWS S3 upload failed: ${s3Error.message}`);
     console.error(`⚠️  Continuing with local storage as fallback...`);
   }
 
@@ -146,8 +166,8 @@ async function processUploadedResume(file, req) {
   const pdfText = pdfData.text;
 
   if (!pdfText || pdfText.length === 0) {
-    // Clean up local file if Cloudinary succeeded
-    if (cloudinaryUrl) {
+    // Clean up local file if S3 succeeded
+    if (s3Url) {
       await fs.remove(file.path);
     }
     throw new Error('PDF file appears to be empty or could not be parsed');
@@ -166,8 +186,8 @@ async function processUploadedResume(file, req) {
   // Check MongoDB connection before saving
   if (mongoose.connection.readyState !== 1) {
     console.error('❌ MongoDB not connected');
-    // Clean up local file if Cloudinary succeeded
-    if (cloudinaryUrl) {
+    // Clean up local file if S3 succeeded
+    if (s3Url) {
       await fs.remove(file.path);
     }
     throw new Error('Database connection unavailable. Please try again later.');
@@ -178,15 +198,20 @@ async function processUploadedResume(file, req) {
     from: extractedData.email || 'upload@youhrpower.com',
     fromName: extractedData.name || 'Resume Upload',
     subject: `Resume Upload: ${extractedData.name || 'Unknown'} - ${extractedData.role || 'No Role'}`,
-    body: `Resume uploaded directly via shareable link.\n\nFile: ${file.originalname}\n\nExtracted Information:\n${JSON.stringify(extractedData, null, 2)}`,
+    body: `Resume uploaded directly via shareable link.
+
+File: ${file.originalname}
+
+Extracted Information:
+${JSON.stringify(extractedData, null, 2)}`,
     receivedAt: new Date(),
     emailId: `upload_${Date.now()}_${Math.random().toString(36).substring(7)}`,
     hasAttachment: true,
     attachmentData: {
       ...extractedData,
-      cloudinaryUrl: cloudinaryUrl || null,
-      cloudinaryPublicId: cloudinaryPublicId || null,
-      pdfPath: cloudinaryUrl || file.path, // Use Cloudinary URL if available, otherwise local path
+      s3Url: s3Url || null,
+      s3Key: s3Key || null,
+      pdfPath: s3Url || file.path, // Use S3 URL if available, otherwise local path
       rawText: pdfText.substring(0, 5000) // Store first 5000 chars
     }
   };
@@ -195,11 +220,11 @@ async function processUploadedResume(file, req) {
   const savedResume = await Email.create(resumeData);
   console.log(`✅ Resume saved to database: ${savedResume._id}`);
 
-  // Clean up local file if Cloudinary upload succeeded
-  if (cloudinaryUrl) {
+  // Clean up local file if S3 upload succeeded
+  if (s3Url) {
     try {
       await fs.remove(file.path);
-      console.log(`✓ Local file removed (using Cloudinary URL)`);
+      console.log(`✓ Local file removed (using S3 URL)`);
     } catch (removeError) {
       console.warn(`⚠️  Could not remove local file: ${removeError.message}`);
     }
@@ -296,151 +321,170 @@ router.get('/download/:id', async (req, res) => {
     const sanitizedName = originalName.replace(/[^a-zA-Z0-9.-]/g, '_');
     const filename = `${sanitizedName}_resume.pdf`;
 
-    // Check if PDF is stored in Cloudinary
-    if (email.attachmentData && email.attachmentData.cloudinaryUrl) {
-      console.log(`☁️  PDF stored in Cloudinary: ${email.attachmentData.cloudinaryUrl}`);
-      
-      try {
-        const cloudinaryPublicId = email.attachmentData.cloudinaryPublicId;
-        
-        if (cloudinaryPublicId) {
-          console.log(`📥 Generating Cloudinary download URL (Public ID: ${cloudinaryPublicId})...`);
+    const https = require('https');
+    const http = require('http');
+    
+    const fetchFromUrl = async (url) => {
+      console.log(`📥 Fetching: ${url}`);
+      return new Promise((resolve, reject) => {
+        try {
+          const urlObj = new URL(url);
+          const protocol = urlObj.protocol === 'https:' ? https : http;
           
-          // Use Cloudinary's URL helper to generate a proper download URL
-          // For raw files, we need to specify resource_type: 'raw'
-          let downloadUrl;
+          // Add Cloudinary Basic Auth if it's a Cloudinary URL
+          const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          };
           
-          try {
-            // Generate URL using Cloudinary API - this ensures proper format
-            downloadUrl = cloudinary.url(cloudinaryPublicId, {
-              resource_type: 'raw',
-              secure: true,
-              // Add attachment flag to force download
-              flags: 'attachment'
-            });
-            
-            console.log(`✅ Generated Cloudinary URL: ${downloadUrl}`);
-          } catch (urlError) {
-            console.warn(`⚠️  Could not generate URL with API, using stored URL: ${urlError.message}`);
-            downloadUrl = email.attachmentData.cloudinaryUrl;
-            
-            // Ensure it's the correct format for raw files
-            if (!downloadUrl.includes('/raw/upload/') && downloadUrl.includes('/upload/')) {
-              downloadUrl = downloadUrl.replace('/upload/', '/raw/upload/');
-            }
+          if (url.includes('cloudinary.com')) {
+            const auth = Buffer.from(`${process.env.CLOUDINARY_API_KEY}:${process.env.CLOUDINARY_API_SECRET}`).toString('base64');
+            headers['Authorization'] = `Basic ${auth}`;
+            console.log('   (Using Cloudinary API Authentication)');
           }
           
-          // Fetch PDF from Cloudinary
-          const https = require('https');
-          const http = require('http');
-          
-          console.log(`📥 Fetching PDF from Cloudinary: ${downloadUrl}`);
-          
-          const pdfBuffer = await new Promise((resolve, reject) => {
-            const urlObj = new URL(downloadUrl);
-            const protocol = urlObj.protocol === 'https:' ? https : http;
+          const request = protocol.get(url, {
+            headers,
+            timeout: 30000
+          }, (response) => {
+            // Handle redirects
+            if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+              const redirectUrl = new URL(response.headers.location, url).href;
+              console.log(`🔄 Following redirect to: ${redirectUrl}`);
+              fetchFromUrl(redirectUrl).then(resolve).catch(reject);
+              return;
+            }
             
-            const request = protocol.get(downloadUrl, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-              },
-              followRedirect: true
-            }, (response) => {
-              // Handle redirects (Cloudinary might redirect)
-              if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                const redirectUrl = response.headers.location;
-                console.log(`🔄 Following redirect to: ${redirectUrl}`);
-                
-                const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                const redirectRequest = redirectProtocol.get(redirectUrl, (redirectResponse) => {
-                  if (redirectResponse.statusCode !== 200) {
-                    reject(new Error(`Failed after redirect: ${redirectResponse.statusCode}`));
-                    return;
-                  }
-                  
-                  const chunks = [];
-                  redirectResponse.on('data', (chunk) => chunks.push(chunk));
-                  redirectResponse.on('end', () => resolve(Buffer.concat(chunks)));
-                  redirectResponse.on('error', reject);
-                });
-                
-                redirectRequest.on('error', reject);
-                redirectRequest.setTimeout(30000, () => {
-                  redirectRequest.destroy();
-                  reject(new Error('Redirect fetch timeout'));
-                });
-                
-                return;
-              }
-              
-              if (response.statusCode === 401 || response.statusCode === 403) {
-                // If still unauthorized, the file might be private or URL is wrong
-                // Try using the original stored URL as-is
-                console.warn(`⚠️  Got ${response.statusCode}, trying original stored URL...`);
-                
-                const originalUrl = email.attachmentData.cloudinaryUrl;
-                const originalProtocol = originalUrl.startsWith('https:') ? https : http;
-                const originalRequest = originalProtocol.get(originalUrl, (originalResponse) => {
-                  if (originalResponse.statusCode !== 200) {
-                    reject(new Error(`Original URL also failed: ${originalResponse.statusCode}. File might be private or URL incorrect.`));
-                    return;
-                  }
-                  
-                  const chunks = [];
-                  originalResponse.on('data', (chunk) => chunks.push(chunk));
-                  originalResponse.on('end', () => resolve(Buffer.concat(chunks)));
-                  originalResponse.on('error', reject);
-                });
-                
-                originalRequest.on('error', reject);
-                originalRequest.setTimeout(30000, () => {
-                  originalRequest.destroy();
-                  reject(new Error('Original URL fetch timeout'));
-                });
-                
-                return;
-              }
-              
-              if (response.statusCode !== 200) {
-                reject(new Error(`Failed to fetch PDF from Cloudinary: ${response.statusCode} ${response.statusMessage}`));
-                return;
-              }
+            if (response.statusCode !== 200) {
+              reject(new Error(`HTTP ${response.statusCode}`));
+              return;
+            }
 
-              const chunks = [];
-              response.on('data', (chunk) => chunks.push(chunk));
-              response.on('end', () => resolve(Buffer.concat(chunks)));
-              response.on('error', reject);
-            });
-
-            request.on('error', reject);
-            request.setTimeout(30000, () => {
-              request.destroy();
-              reject(new Error('Cloudinary fetch timeout'));
-            });
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => resolve(Buffer.concat(chunks)));
+            response.on('error', (err) => reject(new Error(`Stream error: ${err.message}`)));
           });
 
-          console.log(`✅ PDF fetched from Cloudinary, size: ${pdfBuffer.length} bytes`);
-          console.log(`📤 Sending PDF to client as: ${filename}`);
+          request.on('error', (err) => reject(new Error(`Request error: ${err.message}`)));
+          request.on('timeout', () => {
+            request.destroy();
+            reject(new Error('Timeout'));
+          });
+        } catch (e) {
+          reject(new Error(`URL parsing error: ${e.message}`));
+        }
+      });
+    };
 
-          // Set headers and send PDF
+    // Check if PDF is stored in AWS S3
+    if (email.attachmentData && (email.attachmentData.s3Url || email.attachmentData.s3Key)) {
+      console.log(`☁️  PDF linked to AWS S3: ${email.attachmentData.s3Url}`);
+      
+      try {
+        const s3Key = email.attachmentData.s3Key;
+        if (s3Key) {
+          const command = new GetObjectCommand({
+            Bucket: bucketName,
+            Key: s3Key,
+          });
+          
+          const { Body } = await s3Client.send(command);
+          
+          const pdfBuffer = await streamToBuffer(Body);
+          
+          if (pdfBuffer) {
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Content-Length', pdfBuffer.length);
+            res.send(pdfBuffer);
+            return;
+          }
+        }
+      } catch (s3Error) {
+        console.error(`❌ AWS S3 error: ${s3Error.message}`);
+        console.error(`   Falling back to alternative methods...`);
+      }
+    }
+
+    // Check if PDF is stored in Cloudinary (legacy support)
+    if (email.attachmentData && (email.attachmentData.cloudinaryUrl || email.attachmentData.cloudinaryPublicId)) {
+      console.log(`☁️  PDF linked to Cloudinary: ${email.attachmentData.cloudinaryUrl}`);
+      
+      try {
+        let pdfBuffer = null;
+        let publicId = email.attachmentData.cloudinaryPublicId;
+        
+        if (publicId) {
+          // IDs to try: Literal from DB, then with/without .pdf, then my "fixed" versions
+          const idsToTry = [
+            publicId,
+            publicId.endsWith('.pdf') ? publicId.slice(0, -4) : publicId + '.pdf',
+            publicId.replace('resumes/resumes/', 'resumes/'),
+            publicId.replace('resumes/resumes/', 'resumes/').replace(/\.pdf$/i, '')
+          ];
+          
+          const types = ['upload', 'authenticated'];
+          
+          let version = null;
+          if (email.attachmentData.cloudinaryUrl) {
+            const vMatch = email.attachmentData.cloudinaryUrl.match(/\/v(\d+)\//);
+            if (vMatch) version = vMatch[1];
+          }
+
+          outerLoop: for (const idToTry of [...new Set(idsToTry)]) {
+            for (const typeToTry of types) {
+              try {
+                const options = { resource_type: 'raw', secure: true, sign_url: true, type: typeToTry };
+                if (version) options.version = version;
+                
+                const signedUrl = cloudinary.url(idToTry, options);
+                console.log(`📥 Trying signed URL (${typeToTry}): ${idToTry}`);
+                pdfBuffer = await fetchFromUrl(signedUrl);
+                if (pdfBuffer) {
+                  console.log(`✅ Success with signed URL: ${idToTry}`);
+                  break outerLoop;
+                }
+              } catch (e) {
+                console.warn(`⚠️  Signed URL failed for ${idToTry} (${typeToTry}): ${e.message}`);
+              }
+            }
+          }
+        }
+        
+        // Final fallback: Try the direct stored URL with Basic Auth
+        if (!pdfBuffer && email.attachmentData.cloudinaryUrl) {
+          // Normalize URL: ONLY fix typos, do NOT fix folders yet
+          let directUrls = [
+            email.attachmentData.cloudinaryUrl.replace(/\/uploaad\//g, '/upload/').replace(/\/rraw\//g, '/raw/'),
+            email.attachmentData.cloudinaryUrl.replace(/\/uploaad\//g, '/upload/').replace(/\/rraw\//g, '/raw/').replace(/\/resumes\/resumes\//g, '/resumes/')
+          ];
+          
+          for (const url of [...new Set(directUrls)]) {
+            try {
+              console.log(`📥 Final fallback: Fetching URL: ${url}`);
+              pdfBuffer = await fetchFromUrl(url);
+              if (pdfBuffer) {
+                console.log(`✅ Success with direct URL: ${url}`);
+                break;
+              }
+            } catch (directFail) {
+              console.error(`❌ Direct fetch failed for ${url}: ${directFail.message}`);
+            }
+          }
+        }
+
+        if (pdfBuffer) {
           res.setHeader('Content-Type', 'application/pdf');
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
           res.setHeader('Content-Length', pdfBuffer.length);
           res.send(pdfBuffer);
-          
           return;
-        } else {
-          // No public ID - this shouldn't happen if upload was successful
-          console.log(`⚠️  No Cloudinary public ID found`);
-          throw new Error('Cloudinary public ID missing');
         }
+        
+        throw new Error('All Cloudinary fetch attempts failed');
       } catch (cloudinaryError) {
-        console.error(`❌ Error fetching from Cloudinary: ${cloudinaryError.message}`);
-        console.error(`   Cloudinary URL: ${email.attachmentData?.cloudinaryUrl}`);
-        console.error(`   Public ID: ${email.attachmentData?.cloudinaryPublicId}`);
-        console.error(`   Error details:`, cloudinaryError);
+        console.error(`❌ Cloudinary error: ${cloudinaryError.message}`);
         console.error(`   Falling back to local file...`);
-        // Fall through to try local file - don't return here
       }
     }
     
@@ -464,63 +508,46 @@ router.get('/download/:id', async (req, res) => {
     let pdfPath = email.attachmentData.pdfPath;
     console.log(`📄 PDF path from DB: ${pdfPath}`);
     
-    // Skip URL handling if it's a Cloudinary URL (already tried above)
-    // Only handle non-Cloudinary URLs here
+    // If pdfPath is a URL, try to fetch it
     if (pdfPath && (pdfPath.startsWith('http://') || pdfPath.startsWith('https://'))) {
-      // Check if it's a Cloudinary URL - if so, we already tried it above
-      if (pdfPath.includes('cloudinary.com') || pdfPath.includes('res.cloudinary.com')) {
-        console.error(`❌ Cloudinary URL failed, and no local file path available`);
-        return res.status(500).json({ 
-          error: 'Failed to download PDF from Cloudinary',
-          details: 'The PDF is stored in Cloudinary but could not be accessed. Please check Cloudinary configuration or re-upload the file.'
-        });
-      }
-      console.log(`☁️  PDF path is a URL (non-Cloudinary), fetching from: ${pdfPath}`);
+      const directUrls = [pdfPath];
+      const fixedUrl = pdfPath.replace('/uploaad/', '/upload/').replace('/rraw/', '/raw/');
+      if (fixedUrl !== pdfPath) directUrls.push(fixedUrl);
+
+      console.log(`☁️  PDF path is a URL, attempting to fetch...`);
       
       try {
-        const https = require('https');
-        const http = require('http');
-        const url = new URL(pdfPath);
-        const protocol = url.protocol === 'https:' ? https : http;
+        let pdfBuffer = null;
+        for (const url of directUrls) {
+          try {
+            console.log(`📥 Fetching: ${url}`);
+            pdfBuffer = await fetchFromUrl(url);
+            if (pdfBuffer) break;
+          } catch (e) {
+            console.warn(`⚠️  Failed for ${url}: ${e.message}`);
+          }
+        }
+
+        if (pdfBuffer) {
+          console.log(`✅ PDF fetched from URL, size: ${pdfBuffer.length} bytes`);
+          console.log(`📤 Sending PDF to client as: ${filename}`);
+
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+          res.setHeader('Content-Length', pdfBuffer.length);
+          res.send(pdfBuffer);
+          return;
+        }
         
-        const pdfBuffer = await new Promise((resolve, reject) => {
-          const request = protocol.get(pdfPath, (response) => {
-            if (response.statusCode !== 200) {
-              reject(new Error(`Failed to fetch PDF: ${response.statusCode}`));
-              return;
-            }
-
-            const chunks = [];
-            response.on('data', (chunk) => chunks.push(chunk));
-            response.on('end', () => resolve(Buffer.concat(chunks)));
-            response.on('error', reject);
-          });
-
-          request.on('error', reject);
-          request.setTimeout(30000, () => {
-            request.destroy();
-            reject(new Error('PDF fetch timeout'));
-          });
-        });
-
-        console.log(`✅ PDF fetched from URL, size: ${pdfBuffer.length} bytes`);
-        console.log(`📤 Sending PDF to client as: ${filename}`);
-
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.setHeader('Content-Length', pdfBuffer.length);
-        res.send(pdfBuffer);
-        
-        return;
+        throw new Error('URL fetch failed');
       } catch (urlError) {
         console.error(`❌ Error fetching from URL: ${urlError.message}`);
-        // Don't return here - fall through to try local file
         console.error(`   Falling back to local file...`);
       }
     }
 
     // Resolve to absolute path if relative
-    if (!path.isAbsolute(pdfPath)) {
+    if (pdfPath && !pdfPath.startsWith('http') && !path.isAbsolute(pdfPath)) {
       pdfPath = path.resolve(__dirname, '..', pdfPath);
       console.log(`📄 Resolved absolute path: ${pdfPath}`);
     }
@@ -665,7 +692,7 @@ router.post('/add-from-url', async (req, res) => {
     
     try {
       const timestamp = Date.now();
-      const cloudinaryFilename = `resumes/${timestamp}_resume_from_url`;
+      const cloudinaryFilename = `${timestamp}_resume_from_url`;
       
       cloudinaryResult = await new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(

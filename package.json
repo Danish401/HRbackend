@@ -10,6 +10,10 @@
     "restart": "npm run kill && timeout /t 2 /nobreak >nul 2>&1 && npm start"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.980.0",
+    "@aws-sdk/lib-storage": "^3.980.0",
+    "@azure/msal-node": "^5.0.3",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.5",
@@ -17,10 +21,12 @@
     "express": "^4.18.2",
     "fs-extra": "^11.1.1",
     "imap-simple": "^5.0.0",
+    "isomorphic-fetch": "^3.0.0",
     "jsonwebtoken": "^9.0.3",
     "mailparser": "^3.6.5",
     "mongoose": "^7.6.3",
     "multer": "^2.0.2",
+    "node-tnef": "^1.4.0",
     "pdf-parse": "^1.1.1",
     "pdf-to-img": "^5.0.0",
     "redis": "^4.6.12",

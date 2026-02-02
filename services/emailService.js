@@ -16,35 +16,43 @@ try {
 
 const Email = require('../models/Resume');
 const { extractResumeData } = require('./pdfParser');
-const cloudinary = require('../config/cloudinary');
+const { s3Client, bucketName } = require('../config/s3');
+const { Upload } = require("@aws-sdk/lib-storage");
 const redisService = require('./redisService');
+const tnef = require('node-tnef');
+const graphService = require('./graphService');
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, '../uploads');
 fs.ensureDirSync(uploadsDir);
 
-// IMAP configuration with proper settings
-const imapConfig = {
-  imap: {
-    user: process.env.IMAP_USER,
-    password: process.env.IMAP_PASSWORD,
-    host: process.env.IMAP_HOST || 'imap.gmail.com',
-    port: parseInt(process.env.IMAP_PORT) || 993,
-    tls: true,
-    tlsOptions: { rejectUnauthorized: false },
-    authTimeout: 20000,
-    connTimeout: 20000,
-    keepalive: {
-      interval: 10000,
-      idleInterval: 300000,
-      forceNoop: true
+// IMAP configuration factory
+const createImapConfig = (user, password, host, port) => {
+  const imapHost = host || 'imap.gmail.com';
+  return {
+    imap: {
+      user,
+      password,
+      host: imapHost,
+      port: parseInt(port) || 993,
+      tls: true,
+      tlsOptions: { 
+        rejectUnauthorized: false,
+        servername: imapHost // Required for some servers like Outlook
+      },
+      authTimeout: 20000,
+      connTimeout: 20000,
+      // debug: console.log, // Uncomment for raw IMAP traffic
+      keepalive: {
+        interval: 10000,
+        idleInterval: 300000,
+        forceNoop: true
+      }
     }
-  }
+  };
 };
 
-let isMonitoring = false;
-let connection = null;
-let checkInterval = null;
+let monitoringInstances = [];
 
 // Store processed email UIDs (in-memory fallback)
 const processedEmails = new Set();
@@ -55,9 +63,9 @@ redisService.initializeRedis().catch(err => {
 });
 
 /**
- * Main function to process emails
+ * Main function to process emails for a specific connection
  */
-async function processEmail(connection, io) {
+async function processEmail(connection, io, accountName = 'Primary') {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -71,7 +79,7 @@ async function processEmail(connection, io) {
     };
 
     const todayStr = formatDate(today);
-    console.log(`\n📧 Searching for emails from today: ${todayStr}...`);
+    console.log(`\n📧 [${accountName}] Searching for emails from today: ${todayStr}...`);
 
     let messages = [];
 
@@ -107,12 +115,12 @@ async function processEmail(connection, io) {
       return;
     }
 
-    console.log(`\n✅ Found ${messages.length} email(s) from today`);
-    console.log(`\n🚀 Processing today's emails...\n`);
+    console.log(`\n✅ [${accountName}] Found ${messages.length} email(s) from today`);
+    console.log(`\n🚀 [${accountName}] Processing today's emails...\n`);
 
     // Process each message
     for (const message of messages) {
-      await processIndividualEmail(message, connection, io);
+      await processIndividualEmail(message, connection, io, accountName);
     }
 
   } catch (error) {
@@ -257,24 +265,24 @@ function filterEmailsByDate(messages, today) {
 /**
  * Process individual email message
  */
-async function processIndividualEmail(message, connection, io) {
+async function processIndividualEmail(message, connection, io, accountName = 'Primary') {
   const uid = message.attributes.uid;
 
   // Check if already processed
   if (processedEmails.has(uid)) {
-    console.log(`⏭️  Email UID ${uid} already processed (in-memory), skipping...`);
+    console.log(`⏭️  [${accountName}] Email UID ${uid} already processed (in-memory), skipping...`);
     return;
   }
 
   try {
     const isProcessed = await redisService.isEmailProcessed(uid);
     if (isProcessed) {
-      console.log(`⏭️  Email UID ${uid} already processed (Redis), skipping...`);
+      console.log(`⏭️  [${accountName}] Email UID ${uid} already processed (Redis), skipping...`);
       processedEmails.add(uid);
       return;
     }
   } catch (error) {
-    console.log(`⚠️ Redis check failed for UID ${uid}, continuing...`);
+    console.log(`⚠️  [${accountName}] Redis check failed for UID ${uid}, continuing...`);
   }
 
   try {
@@ -287,14 +295,14 @@ async function processIndividualEmail(message, connection, io) {
     const emailDate = message.attributes.date || new Date();
 
     console.log(`\n${'='.repeat(80)}`);
-    console.log(`📨 Processing Email UID ${uid}`);
+    console.log(`📨 [${accountName}] Processing Email UID ${uid}`);
     console.log(`   From: ${fromName} <${fromEmail}>`);
     console.log(`   Subject: "${subject}"`);
     console.log(`   Date: ${new Date(emailDate).toLocaleString()}`);
     console.log(`${'='.repeat(80)}`);
 
     // Fetch full email body
-    console.log(`📥 Fetching full email content...`);
+    console.log(`📥 [${accountName}] Fetching full email content...`);
     
     const fullMessages = await connection.search([['UID', uid]], {
       bodies: [''],
@@ -338,7 +346,7 @@ async function processIndividualEmail(message, connection, io) {
     console.log(`✓ Email body fetched (${emailBody.length} bytes)`);
 
     // Process email content
-    await processEmailContent(emailBody, uid, subject, fromEmail, fromName, emailDate, io);
+    await processEmailContent(emailBody, uid, subject, fromEmail, fromName, emailDate, io, accountName);
 
   } catch (error) {
     console.error(`❌ Error processing email UID ${uid}:`, error.message);
@@ -349,7 +357,7 @@ async function processIndividualEmail(message, connection, io) {
 /**
  * Process email content (parse, extract attachments, save to DB)
  */
-async function processEmailContent(emailData, uid, subject, fromEmail, fromName, emailDate, io) {
+async function processEmailContent(emailData, uid, subject, fromEmail, fromName, emailDate, io, accountName = 'Primary') {
   try {
     // Parse email
     const parsed = await simpleParser(emailData);
@@ -375,18 +383,51 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
       return;
     }
 
+    // Process attachments (including potential winmail.dat/TNEF)
+    let attachments = parsed.attachments || [];
+    
+    // Handle Outlook's winmail.dat (TNEF)
+    const tnefAttachment = attachments.find(a => 
+      a.filename === 'winmail.dat' || a.contentType === 'application/ms-tnef'
+    );
+    
+    if (tnefAttachment) {
+      console.log(`📦 [${accountName}] Found winmail.dat (TNEF) attachment, extracting...`);
+      try {
+        const tnefData = tnef.parseBuffer(tnefAttachment.content);
+        if (tnefData && tnefData.Attachments) {
+          console.log(`✓ [${accountName}] Extracted ${tnefData.Attachments.length} file(s) from winmail.dat`);
+          for (const tnefFile of tnefData.Attachments) {
+            // Check if it's a PDF
+            const filename = tnefFile.Title || 'attachment.pdf';
+            if (filename.toLowerCase().endsWith('.pdf')) {
+              attachments.push({
+                filename: filename,
+                content: tnefFile.Data,
+                contentType: 'application/pdf'
+              });
+            }
+          }
+        }
+      } catch (tnefError) {
+        console.error(`❌ [${accountName}] Error parsing winmail.dat:`, tnefError.message);
+      }
+    }
+
     // Process PDF attachments
     let attachmentData = null;
     let hasAttachment = false;
 
-    if (parsed.attachments && parsed.attachments.length > 0) {
-      console.log(`\n📎 Found ${parsed.attachments.length} attachment(s)`);
+    if (attachments.length > 0) {
+      console.log(`\n📎 [${accountName}] Found ${attachments.length} attachment(s) (including extracted)`);
 
-      for (const attachment of parsed.attachments) {
+      for (const attachment of attachments) {
         const filename = attachment.filename || 'attachment.pdf';
         const contentType = attachment.contentType || '';
         const isPdf = contentType === 'application/pdf' || 
                      filename.toLowerCase().endsWith('.pdf');
+
+        if (filename === 'winmail.dat') continue; // Skip the container
 
         console.log(`\n  📎 ${filename}`);
         console.log(`     Type: ${contentType}`);
@@ -395,7 +436,7 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
 
         if (isPdf) {
           hasAttachment = true;
-          attachmentData = await processPdfAttachment(attachment, filename);
+          attachmentData = await processPdfAttachment(attachment, filename, accountName);
           break; // Process only first PDF
         }
       }
@@ -425,7 +466,7 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
       console.log(`   Email: ${attachmentData.email || 'N/A'}`);
       console.log(`   Contact: ${attachmentData.contactNumber || 'N/A'}`);
       console.log(`   DOB: ${attachmentData.dateOfBirth || 'N/A'}`);
-      console.log(`   Cloudinary: ${attachmentData.cloudinaryUrl ? '✅' : '❌'}`);
+      console.log(`   S3: ${attachmentData.s3Url ? '✅' : '❌'}`);
     }
 
     // Mark as processed
@@ -452,8 +493,8 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
 /**
  * Process PDF attachment
  */
-async function processPdfAttachment(attachment, filename) {
-  console.log(`\n🔧 Processing PDF: ${filename}`);
+async function processPdfAttachment(attachment, filename, accountName = 'Primary') {
+  console.log(`\n🔧 [${accountName}] Processing PDF: ${filename}`);
 
   try {
     // Convert attachment to Buffer
@@ -469,118 +510,105 @@ async function processPdfAttachment(attachment, filename) {
       }
     }
 
-    console.log(`  PDF buffer size: ${pdfContent.length} bytes`);
+    console.log(`  [${accountName}] PDF buffer size: ${pdfContent.length} bytes`);
 
-    // Upload to Cloudinary
-    let cloudinaryUrl = null;
-    let cloudinaryPublicId = null;
+    // Upload to AWS S3
+    let s3Url = null;
+    let s3Key = null;
 
-    if (process.env.CLOUDINARY_CLOUD_NAME && 
-        process.env.CLOUDINARY_API_KEY && 
-        process.env.CLOUDINARY_API_SECRET) {
+    if (process.env.AWS_ACCESS_KEY_ID && 
+        process.env.AWS_SECRET_ACCESS_KEY && 
+        process.env.AWS_REGION && 
+        process.env.AWS_S3_BUCKET_NAME) {
       
-      console.log(`  ☁️  Uploading to Cloudinary...`);
+      console.log(`  ☁️  [${accountName}] Uploading to AWS S3...`);
 
       try {
         const timestamp = Date.now();
         const sanitizedFilename = filename
-          .replace(/[^a-zA-Z0-9.-]/g, '_')
-          .replace(/\.pdf$/i, '');
+          .replace(/[^a-zA-Z0-9.-]/g, '_');
 
-        const cloudinaryFilename = `resumes/${timestamp}_${sanitizedFilename}`;
+        s3Key = `resumes/${timestamp}_${sanitizedFilename}`;
 
-        const result = await new Promise((resolve, reject) => {
-          const uploadStream = cloudinary.uploader.upload_stream(
-            {
-              resource_type: 'raw',
-              folder: 'resumes',
-              public_id: cloudinaryFilename,
-              format: 'pdf',
-              type: 'upload',
-              access_mode: 'public'
-            },
-            (error, result) => {
-              if (error) reject(error);
-              else resolve(result);
-            }
-          );
-          uploadStream.end(pdfContent);
+        const upload = new Upload({
+          client: s3Client,
+          params: {
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: pdfContent,
+            ContentType: 'application/pdf',
+          },
         });
 
-        cloudinaryUrl = result.secure_url || result.url;
-        cloudinaryPublicId = result.public_id;
+        const result = await upload.done();
+        s3Url = result.Location;
 
-        console.log(`  ✅ Uploaded to Cloudinary`);
-        console.log(`     URL: ${cloudinaryUrl}`);
-      } catch (cloudinaryError) {
-        console.error(`  ❌ Cloudinary upload failed: ${cloudinaryError.message}`);
+        console.log(`  ✅ [${accountName}] Uploaded to AWS S3`);
+        console.log(`     URL: ${s3Url}`);
+      } catch (s3Error) {
+        console.error(`  ❌ [${accountName}] AWS S3 upload failed: ${s3Error.message}`);
       }
     } else {
-      console.log(`  ⚠️  Cloudinary not configured, saving locally`);
+      console.log(`  ⚠️  [${accountName}] AWS S3 not configured, saving locally`);
     }
 
     // Save locally as fallback
     let localPath = null;
-    if (!cloudinaryUrl) {
+    if (!s3Url) {
       const timestamp = Date.now();
       const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
       const pdfFilename = `${timestamp}_${sanitizedFilename}`;
       localPath = path.join(uploadsDir, pdfFilename);
       await fs.writeFile(localPath, pdfContent);
-      console.log(`  ✓ Saved locally: ${pdfFilename}`);
+      console.log(`  ✓ [${accountName}] Saved locally: ${pdfFilename}`);
     }
 
     // Extract text from PDF
-    console.log(`  📄 Extracting text from PDF...`);
+    console.log(`  📄 [${accountName}] Extracting text from PDF...`);
     let extractedText = '';
 
     try {
       const pdfData = await pdfParse(pdfContent);
       extractedText = pdfData.text || '';
-      console.log(`  ✅ Extracted ${extractedText.length} characters`);
+      console.log(`  ✅ [${accountName}] Extracted ${extractedText.length} characters`);
     } catch (parseError) {
-      console.log(`  ⚠️  pdf-parse failed: ${parseError.message}`);
+      console.log(`  ⚠️  [${accountName}] pdf-parse failed: ${parseError.message}`);
 
       // Try OCR if available
       if (Tesseract && extractedText.length < 50) {
-        console.log(`  🔍 Attempting OCR...`);
+        console.log(`  🔍 [${accountName}] Attempting OCR...`);
         try {
           const { data: { text } } = await Tesseract.recognize(pdfContent, 'eng');
           if (text && text.trim().length > 0) {
             extractedText = text;
-            console.log(`  ✅ OCR extracted ${extractedText.length} characters`);
+            console.log(`  ✅ [${accountName}] OCR extracted ${extractedText.length} characters`);
           }
         } catch (ocrError) {
-          console.error(`  ❌ OCR failed: ${ocrError.message}`);
+          console.error(`  ❌ [${accountName}] OCR failed: ${ocrError.message}`);
         }
       }
     }
 
     // Extract structured data
-    console.log(`  🔍 Extracting structured data...`);
+    console.log(`  🔍 [${accountName}] Extracting structured data...`);
     const extractedData = extractResumeData(extractedText);
 
-    console.log(`  ✓ Extracted:`);
+    console.log(`  ✓ [${accountName}] Extracted:`);
     console.log(`     Name: ${extractedData.name || 'N/A'}`);
     console.log(`     Email: ${extractedData.email || 'N/A'}`);
     console.log(`     Contact: ${extractedData.contactNumber || 'N/A'}`);
     console.log(`     DOB: ${extractedData.dateOfBirth || 'N/A'}`);
 
     return {
-      name: extractedData.name || '',
-      email: extractedData.email || '',
-      contactNumber: extractedData.contactNumber || '',
-      dateOfBirth: extractedData.dateOfBirth || '',
-      experience: extractedData.experience || '',
-      role: extractedData.role || '',
-      cloudinaryUrl: cloudinaryUrl || null,
-      cloudinaryPublicId: cloudinaryPublicId || null,
-      pdfPath: cloudinaryUrl || localPath,
+      ...extractedData,
+      s3Url: s3Url || null,
+      s3Key: s3Key || null,
+      pdfPath: s3Url || localPath,
       rawText: extractedText.substring(0, 5000)
     };
 
   } catch (error) {
-    console.error(`  ❌ Error processing PDF: ${error.message}`);
+    console.error(`  ❌ [${accountName}] Error processing PDF: ${error.message}`);
     throw error;
   }
 }
@@ -599,148 +627,180 @@ async function markAsProcessed(uid) {
 }
 
 /**
- * Start email monitoring
+ * Start email monitoring for all configured accounts
  */
 async function startMonitoring(io) {
-  if (isMonitoring) {
-    console.log('⚠️ Email monitoring already running');
+  const configs = [];
+  
+  // Primary/Gmail Account
+  if (process.env.IMAP_USER && process.env.IMAP_PASSWORD) {
+    configs.push({
+      name: 'Primary',
+      config: createImapConfig(
+        process.env.IMAP_USER,
+        process.env.IMAP_PASSWORD,
+        process.env.IMAP_HOST,
+        process.env.IMAP_PORT
+      )
+    });
+  }
+
+  // Outlook/Microsoft Account
+  if (process.env.OUTLOOK_USER && process.env.OUTLOOK_PASSWORD) {
+    configs.push({
+      name: 'Outlook',
+      config: createImapConfig(
+        process.env.OUTLOOK_USER,
+        process.env.OUTLOOK_PASSWORD,
+        process.env.OUTLOOK_HOST || 'outlook.office365.com',
+        process.env.OUTLOOK_PORT || 993
+      )
+    });
+  }
+
+  if (configs.length === 0) {
+    console.error('❌ No IMAP accounts configured! Please check your .env file.');
     return;
   }
 
+  for (const account of configs) {
+    await startAccountMonitoring(account, io);
+  }
+
+  // Also start Microsoft Graph API polling if configured
+  if (process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID) {
+    console.log(`\n🚀 [Outlook-Graph] Starting Microsoft Graph API polling...`);
+    
+    const pollInterval = setInterval(async () => {
+      try {
+        await graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io);
+      } catch (err) {
+        console.error('❌ [Outlook-Graph] Polling error:', err.message);
+      }
+    }, 5 * 60 * 1000); // Poll every 5 minutes
+
+    monitoringInstances.push({
+      name: 'Outlook-Graph',
+      stop: async () => {
+        clearInterval(pollInterval);
+      }
+    });
+
+    // Run initial fetch immediately
+    graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(console.error);
+  }
+}
+
+/**
+ * Start monitoring for a specific account
+ */
+async function startAccountMonitoring(account, io) {
+  const { name, config } = account;
+  
   try {
-    // Validate configuration
-    if (!process.env.IMAP_USER || !process.env.IMAP_PASSWORD) {
-      console.error('❌ IMAP credentials not configured!');
-      console.error('   Please set IMAP_USER and IMAP_PASSWORD in .env file');
-      return;
-    }
+    console.log(`\n🔄 [${name}] Connecting to IMAP server...`);
+    console.log(`   Host: ${config.imap.host}`);
+    console.log(`   User: ${config.imap.user}`);
 
-    console.log('\n🔄 Connecting to IMAP server...');
-    console.log(`   Host: ${imapConfig.imap.host}`);
-    console.log(`   Port: ${imapConfig.imap.port}`);
-    console.log(`   User: ${imapConfig.imap.user}`);
+    const connection = await imap.connect(config);
+    let isConnected = true;
 
-    // Connect
-    connection = await imap.connect(imapConfig);
+    const instance = {
+      name,
+      connection,
+      checkInterval: null,
+      stop: async () => {
+        if (instance.checkInterval) clearInterval(instance.checkInterval);
+        if (connection) await connection.end();
+        isConnected = false;
+      }
+    };
+
+    monitoringInstances.push(instance);
 
     // Set up error handlers
     connection.on('error', (err) => {
-      console.error('\n❌ IMAP connection error:', err.message);
-      isMonitoring = false;
-      
-      // Attempt reconnection after delay
-      setTimeout(() => {
-        if (!isMonitoring) {
-          console.log('🔄 Attempting to reconnect...');
-          startMonitoring(io).catch(console.error);
-        }
-      }, 30000);
+      console.error(`\n❌ [${name}] IMAP connection error:`, err.message);
+      isConnected = false;
     });
 
     connection.on('end', () => {
-      console.warn('\n⚠️ IMAP connection ended');
-      isMonitoring = false;
+      console.warn(`\n⚠️  [${name}] IMAP connection ended`);
+      isConnected = false;
     });
 
     // Open inbox
     await connection.openBox('INBOX', true);
-    
-    console.log('✅ Connected to IMAP server successfully\n');
-    isMonitoring = true;
+    console.log(`✅ [${name}] Connected successfully\n`);
 
     // Process existing emails
-    console.log('📧 Processing existing emails from today...');
-    await processEmail(connection, io);
+    await processEmail(connection, io, name);
 
     // Set up periodic checking (every 5 minutes)
     const CHECK_INTERVAL = 5 * 60 * 1000;
-    checkInterval = setInterval(async () => {
-      if (!isMonitoring || !connection) return;
-
-      console.log('\n⏰ Scheduled email check...');
+    instance.checkInterval = setInterval(async () => {
+      if (!isConnected) return;
+      console.log(`\n⏰ [${name}] Scheduled email check...`);
       try {
-        await processEmail(connection, io);
+        await processEmail(connection, io, name);
       } catch (err) {
-        console.error('❌ Scheduled check failed:', err.message);
+        console.error(`❌ [${name}] Scheduled check failed:`, err.message);
       }
     }, CHECK_INTERVAL);
 
     // Listen for new emails
     connection.on('mail', async () => {
-      console.log('\n📬 New email detected!');
+      console.log(`\n📬 [${name}] New email detected!`);
       try {
-        await processEmail(connection, io);
+        await processEmail(connection, io, name);
       } catch (error) {
-        console.error('❌ Error processing new email:', error.message);
+        console.error(`❌ [${name}] Error processing new email:`, error.message);
       }
     });
 
-    console.log('✅ Email monitoring started successfully');
-    console.log(`   Checking every ${CHECK_INTERVAL / 60000} minutes`);
-    console.log('   Listening for new emails in real-time\n');
-
   } catch (error) {
-    console.error('\n❌ Failed to start email monitoring:', error.message);
-    
-    // Provide helpful error messages
-    if (error.code === 'ENOTFOUND') {
-      console.error('\n💡 DNS resolution failed. Check:');
-      console.error('   - Internet connection');
-      console.error('   - IMAP_HOST setting in .env');
-    } else if (error.code === 'ECONNREFUSED') {
-      console.error('\n💡 Connection refused. Check:');
-      console.error('   - IMAP server accessibility');
-      console.error('   - Firewall settings');
-      console.error('   - IMAP_PORT setting in .env');
-    } else if (error.code === 'ETIMEDOUT') {
-      console.error('\n💡 Connection timeout. Check:');
-      console.error('   - Network connectivity');
-      console.error('   - Server availability');
-    } else if (error.message.includes('authenticate') || error.message.includes('Invalid credentials')) {
-      console.error('\n💡 Authentication failed. Check:');
-      console.error('   - IMAP_USER and IMAP_PASSWORD in .env');
-      console.error('   - For Gmail: Enable IMAP and use App Password');
+    console.error(`\n❌ [${name}] Failed to start monitoring:`, error.message);
+    if (error.source === 'authentication' || error.message.includes('LOGIN failed')) {
+      console.log(`   Detailed Error: ${JSON.stringify(error)}`);
     }
-
-    console.error('\n📝 Configuration checklist:');
-    console.error('   ✓ IMAP_USER set in .env');
-    console.error('   ✓ IMAP_PASSWORD set in .env');
-    console.error('   ✓ IMAP_HOST (default: imap.gmail.com)');
-    console.error('   ✓ IMAP_PORT (default: 993)');
-    console.error('   ✓ Internet connection active');
-    console.error('   ✓ Gmail: IMAP enabled + App Password created\n');
-
-    isMonitoring = false;
+    
+    // Provide helpful error messages for login failures
+    if (error.message.includes('LOGIN failed') || error.message.includes('authenticate') || error.message.includes('Invalid credentials')) {
+      console.error(`\n💡 [${name}] Authentication failed. Please check:`);
+      if (name === 'Outlook') {
+        console.error('   1. Ensure IMAP is enabled in Outlook settings (Settings > Mail > Sync email)');
+        console.error('   2. If Two-Factor Authentication is ON, you MUST use an "App Password", not your regular password.');
+        console.error('   3. Go to Microsoft Account Security > Advanced security options to create an App Password.');
+        console.error('   4. If this is a personal account, try changing OUTLOOK_HOST to imap-mail.outlook.com');
+      } else {
+        console.error(`   - Check ${name === 'Primary' ? 'IMAP_USER and IMAP_PASSWORD' : 'credentials'} in .env`);
+        console.error('   - For Gmail: Use an App Password (not your regular password).');
+      }
+    } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+      console.error(`\n💡 [${name}] Connection issue: Check host/port settings and internet connection.`);
+    }
   }
 }
 
 /**
- * Stop email monitoring
+ * Stop email monitoring for all accounts
  */
 async function stopMonitoring() {
-  console.log('\n🛑 Stopping email monitoring...');
-
-  // Clear interval
-  if (checkInterval) {
-    clearInterval(checkInterval);
-    checkInterval = null;
-  }
-
-  // Close connection
-  if (connection) {
+  console.log('\n🛑 Stopping all email monitoring...');
+  for (const instance of monitoringInstances) {
     try {
-      await connection.end();
-    } catch (error) {
-      console.error('⚠️ Error closing connection:', error.message);
+      await instance.stop();
+      console.log(`✅ [${instance.name}] Stopped`);
+    } catch (err) {
+      console.error(`⚠️  [${instance.name}] Error stopping:`, err.message);
     }
-    connection = null;
   }
-
-  isMonitoring = false;
-  console.log('✅ Email monitoring stopped\n');
+  monitoringInstances = [];
 }
 
 module.exports = {
   startMonitoring,
-  stopMonitoring
+  stopMonitoring,
+  processPdfAttachment,
+  markAsProcessed
 };

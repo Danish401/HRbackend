@@ -14,8 +14,8 @@ const emailSchema = new mongoose.Schema({
     default: 'No Subject'
   },
   body: {
-    type: String,
-    required: true
+     type: String,
+    default: ""
   },
   receivedAt: {
     type: Date,
@@ -37,7 +37,18 @@ const emailSchema = new mongoose.Schema({
     dateOfBirth: String,
     experience: String,
     role: String,
-    pdfPath: String,              // Local path (kept for backward compatibility)
+    location: String,
+    skills: [String],
+    education: String,
+    summary: String,
+    links: {
+      linkedin: String,
+      github: String,
+      portfolio: String
+    },
+    pdfPath: String,              // URL (Local, Cloudinary or S3)
+    s3Url: String,                // AWS S3 URL for the PDF
+    s3Key: String,                // AWS S3 Key for deletion
     cloudinaryUrl: String,         // Cloudinary URL for the PDF
     cloudinaryPublicId: String,   // Cloudinary public ID for deletion
     rawText: String
@@ -54,7 +65,18 @@ const resumeSchema = new mongoose.Schema({
   dateOfBirth: String,
   experience: String,
   role: String,
-  pdfPath: String,           // Cloudinary URL
+  location: String,
+  skills: [String],
+  education: String,
+  summary: String,
+  links: {
+    linkedin: String,
+    github: String,
+    portfolio: String
+  },
+  pdfPath: String,           // URL (Cloudinary or S3)
+  s3Url: String,             // AWS S3 URL
+  s3Key: String,             // AWS S3 Key
   cloudinaryId: String,      // For delete (kept for backward compatibility)
   cloudinaryPublicId: String, // Cloudinary public ID
   rawText: String,

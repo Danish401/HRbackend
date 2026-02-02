@@ -9,7 +9,16 @@ function extractResumeData(text) {
     contactNumber: '',
     dateOfBirth: '',
     experience: '',
-    role: ''
+    role: '',
+    location: '',
+    skills: [],
+    education: '',
+    summary: '',
+    links: {
+      linkedin: '',
+      github: '',
+      portfolio: ''
+    }
   };
 
   if (!text || text.length === 0) {
@@ -260,26 +269,27 @@ function extractResumeData(text) {
   // ========== EXTRACT DATE OF BIRTH ==========
   console.log('🔍 Extracting date of birth...');
   const dobPatterns = [
-    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born)\s*[:]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi,
-    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born)\s*[:]?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4})/gi,
-    /(?:born|birth)\s*[:]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi
+    // Support prefixes like zDOB or —DOB or #DOB and various dash types
+    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi,
+    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4})/gi,
+    // Catch cases where DOB is preceded by artifacts like "zDOB"
+    /[a-z]?(?:dob|birth|born)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi
   ];
   
   for (const pattern of dobPatterns) {
-    const match = originalText.match(pattern);
-    if (match) {
-      const dateStr = (match[1] || match[0]).trim();
-      if (dateStr) {
-        data.dateOfBirth = dateStr;
-        console.log(`✓ DOB found: "${data.dateOfBirth}"`);
-        break;
-      }
+    // Reset regex lastIndex for global patterns
+    pattern.lastIndex = 0;
+    const match = pattern.exec(originalText);
+    if (match && (match[1] || match[0])) {
+      data.dateOfBirth = (match[1] || match[0]).trim();
+      console.log(`✓ DOB found: "${data.dateOfBirth}"`);
+      break;
     }
   }
 
-  // If DOB not found, look for any date that looks like a birth date (between 1940-2005)
+  // If DOB not found, look for any date that looks like a birth date (between 1940-2015)
   if (!data.dateOfBirth) {
-    const datePattern = /\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](19[4-9]\d|200[0-5])\b/g;
+    const datePattern = /\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](19[4-9]\d|200[0-9]|201[0-5])\b/g;
     const dateMatches = originalText.match(datePattern);
     if (dateMatches && dateMatches.length > 0) {
       data.dateOfBirth = dateMatches[0].trim();
@@ -392,6 +402,99 @@ function extractResumeData(text) {
 
   if (!data.role) {
     console.log('❌ Role not found');
+  }
+
+  // ========== EXTRACT LOCATION ==========
+  console.log('🔍 Extracting location...');
+  const locationPatterns = [
+    /(?:location|address|city|residence|residing\s*at|place|native)\s*[:\-=]?\s*([A-Za-z\s,]+(?:,\s*[A-Za-z\s]+){0,3})/gi,
+    /(?:^|\n)\s*(?:lives\s*in|based\s*in|from|at)\s*([A-Za-z\s,]+)/i,
+    // Pattern for common city, state/country format: "Delhi, India" or "New York, USA"
+    /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b/
+  ];
+
+  for (const pattern of locationPatterns) {
+    const match = originalText.match(pattern);
+    if (match && match[1]) {
+      const loc = match[1].trim();
+      // Filter out common false positives
+      if (loc.length > 3 && loc.length < 100 && !loc.toLowerCase().includes('engineer') && !loc.toLowerCase().includes('developer')) {
+        data.location = loc;
+        console.log(`✓ Location found: "${data.location}"`);
+        break;
+      }
+    }
+  }
+
+  // ========== EXTRACT LINKS ==========
+  console.log('🔍 Extracting links...');
+  // Improved patterns for full URLs and profiles
+  const linkedinPatterns = [
+    /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9_-]+/gi,
+    /(?:linkedin|lin)\s*[:\-=]?\s*([^\s\n\r,]+)/i
+  ];
+  const githubPatterns = [
+    /(?:https?:\/\/)?(?:www\.)?github\.com\/[A-Za-z0-9_-]+/gi,
+    /(?:github|git)\s*[:\-=]?\s*([^\s\n\r,]+)/i
+  ];
+  const portfolioPattern = /(?:portfolio|website|personal\s*site|web)\s*[:\-=]?\s*(https?:\/\/[^\s\n\r,]+)/gi;
+
+  for (const pattern of linkedinPatterns) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(originalText);
+    if (match) {
+      let link = (match[1] || match[0]).replace(/(?:linkedin|lin)\s*[:\-=]?\s*/i, '').trim();
+      if (link.includes('linkedin.com')) {
+        if (!link.startsWith('http')) link = 'https://' + link;
+      } else if (link.length > 3 && !link.includes('@') && !link.includes('.') ) {
+        link = 'https://www.linkedin.com/in/' + link;
+      } else {
+        continue;
+      }
+      data.links.linkedin = link;
+      console.log(`✓ LinkedIn found: "${data.links.linkedin}"`);
+      break;
+    }
+  }
+
+  for (const pattern of githubPatterns) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(originalText);
+    if (match) {
+      let link = (match[1] || match[0]).replace(/(?:github|git)\s*[:\-=]?\s*/i, '').trim();
+      if (link.includes('github.com')) {
+        if (!link.startsWith('http')) link = 'https://' + link;
+      } else if (link.length > 3 && !link.includes('@') && !link.includes('.') ) {
+        link = 'https://github.com/' + link;
+      } else {
+        continue;
+      }
+      data.links.github = link;
+      console.log(`✓ GitHub found: "${data.links.github}"`);
+      break;
+    }
+  }
+
+  const portfolioMatch = originalText.match(portfolioPattern);
+  if (portfolioMatch) data.links.portfolio = portfolioMatch[1] || portfolioMatch[0];
+
+  // ========== EXTRACT SUMMARY ==========
+  console.log('🔍 Extracting summary...');
+  const summaryPatterns = [
+    /(?:summary|objective|professional\s*profile|about\s*me)\s*[:\-=]?\s*([\s\S]{30,1000}?(?=\n\s*(?:experience|skills|education|projects|work|employment|certifications|languages|hobbies|personal|$)))/gi,
+    /(?:summary|objective|profile)\s*[:\-=]?\s*([^\n\r]+(?:\n[^\n\r]+){1,5})/gi
+  ];
+
+  for (const pattern of summaryPatterns) {
+    const match = pattern.exec(originalText);
+    if (match) {
+      const summary = (match[1] || match[0]).replace(/(?:summary|objective|professional\s*profile|about\s*me)\s*[:\-=]?\s*/gi, '').trim();
+      if (summary.length > 20) {
+        data.summary = summary;
+        console.log(`✓ Summary found (length: ${data.summary.length})`);
+        break;
+      }
+    }
   }
 
   console.log(`\n📊 Final extracted data:`, JSON.stringify(data, null, 2));

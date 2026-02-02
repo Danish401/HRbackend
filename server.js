@@ -137,11 +137,15 @@ mongoose.connection.on('connecting', () => {
 const emailRoutes = require('./routes/emailRoutes');
 const { router: authRoutes, ensureDefaultAdmin } = require('./routes/authRoutes');
 const emailService = require('./services/emailService');
+const smsService = require('./services/smsService');
 const { authenticate } = require('./middleware/auth');
 const redisService = require('./services/redisService');
-// Server startup log updated
+
 // Public routes (no authentication required)
 app.use('/api/auth', authRoutes);
+
+// Public Outlook OAuth routes
+app.use('/api/outlook-auth', emailRoutes);
 
 // Protected routes (authentication required)
 const resumeUploadRoutes = require('./routes/resumeUploadRoutes');
@@ -190,6 +194,9 @@ redisService.initializeRedis().then(() => {
 
 // Start email monitoring
 emailService.startMonitoring(io);
+
+// Initialize birthday checker task
+smsService.initBirthdayTask();
 
 // Start Redis queue processor (processes jobs from queue)
 async function startQueueProcessor() {
