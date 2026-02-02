@@ -69,59 +69,53 @@ console.log('🔄 Attempting to connect to MongoDB...');
 const maskedURI = MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
 console.log(`   URI: ${maskedURI}`);
 
-mongoose.connect(MONGODB_URI, {
-  serverSelectionTimeoutMS: 10000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 10000,
-  maxPoolSize: 10,
-  minPoolSize: 1,
-})
-.then(() => {
-  console.log('✅ MongoDB Connected successfully');
-  console.log(`   Database: ${mongoose.connection.name}`);
-  console.log(`   Host: ${mongoose.connection.host}:${mongoose.connection.port}`);
+const connectWithRetry = () => {
+  console.log('🔄 MongoDB connection attempt...');
+  mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
+    maxPoolSize: 10,
+    minPoolSize: 1,
+  })
+  .then(() => {
+    console.log('✅ MongoDB Connected successfully');
+    console.log(`   Database: ${mongoose.connection.name}`);
+    console.log(`   Host: ${mongoose.connection.host}:${mongoose.connection.port}`);
 
-  // Ensure a default admin exists after successful DB connection
-  try {
-    ensureDefaultAdmin().catch(err => console.error('Error ensuring default admin:', err));
-  } catch (e) {
-    console.error('Error invoking ensureDefaultAdmin:', e);
-  }
+    // Ensure a default admin exists after successful DB connection
+    try {
+      ensureDefaultAdmin().catch(err => console.error('Error ensuring default admin:', err));
+    } catch (e) {
+      console.error('Error invoking ensureDefaultAdmin:', e);
+    }
 
-  // Start background services only after successful DB connection
-  console.log('🚀 Starting background services...');
-  
-  // Start email monitoring
-  emailService.startMonitoring(io);
+    // Start background services only after successful DB connection
+    console.log('🚀 Starting background services...');
+    
+    // Start email monitoring
+    emailService.startMonitoring(io);
 
-  // Initialize birthday checker task
-  smsService.initBirthdayTask();
+    // Initialize birthday checker task
+    smsService.initBirthdayTask();
 
-  // Start Redis queue processor
-  startQueueProcessor();
-})
-.catch(err => {
-  console.error('\n❌ MongoDB connection FAILED!');
-  console.error(`   Error: ${err.message}`);
-  console.error(`   Error Name: ${err.name}`);
-  
-  if (err.name === 'MongoAPIError' && err.message.includes('URI must include hostname')) {
-    console.error('\n   This error means your MongoDB connection string is malformed.');
-    console.error('   Common issues:');
-    console.error('   - Password contains special characters that need URL encoding');
-    console.error('   - Multiple @ signs in the connection string');
-    console.error('   - Invalid connection string format');
-    console.error('\n   Fix:');
-    console.error('   1. Check your MONGODB_URI in .env file');
-    console.error('   2. Encode special characters in password:');
-    console.error('      - @ becomes %40');
-    console.error('      - : becomes %3A');
-    console.error('      - / becomes %2F');
-    console.error('   3. Example: If password is "pass@123", use "pass%40123"');
-  }
-  
-  console.error('\n   Server will start but database operations will fail until MongoDB is connected.\n');
-});
+    // Start Redis queue processor
+    startQueueProcessor();
+  })
+  .catch(err => {
+    console.error('\n❌ MongoDB connection FAILED!');
+    console.error(`   Error: ${err.message}`);
+    
+    if (err.message.includes('authentication failed')) {
+      console.error('   🛑 AUTHENTICATION ERROR: Please check your MONGODB_URI username and password.');
+    }
+    
+    console.log('🔄 Retrying MongoDB connection in 5 seconds...');
+    setTimeout(connectWithRetry, 5000);
+  });
+};
+
+connectWithRetry();
 
 // Handle MongoDB connection events
 mongoose.connection.on('error', (err) => {
