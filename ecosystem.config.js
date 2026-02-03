@@ -15,8 +15,8 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 5000
       },
-      // Auto-restart every 3 minutes in production
-      cron_restart: '*/3 * * * *', // Every 3 minutes
+      // Auto-restart every 5 minutes in production
+      cron_restart: '*/5 * * * *', // Every 5 minutes
       error_file: './logs/err.log',
       out_file: './logs/out.log',
       log_file: './logs/combined.log',

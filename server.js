@@ -292,7 +292,7 @@ server.listen(PORT, () => {
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   
   if (isProduction) {
-    console.log(`   🚀 Production mode: SMS every 3 minutes, auto-restart every 3 minutes`);
+    console.log(`   🚀 Production mode: SMS every 3 minutes, auto-restart every 5 minutes`);
     console.log(`   📊 Monitoring: Check logs/production.log for restart information`);
   } else {
     console.log(`   🔧 Development mode: Using cron schedule for SMS`);

@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Configuration
-const RESTART_INTERVAL = 3 * 60 * 1000; // 3 minutes
+const RESTART_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const LOG_FILE = path.join(__dirname, '../logs/production.log');
 const RESTART_COUNT_FILE = path.join(__dirname, '../logs/restart-count.txt');
 
