@@ -6,6 +6,9 @@ const cron = require('node-cron');
 // Environment check
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Auto-restart configuration
+const AUTO_RESTART_INTERVAL = 3 * 60 * 1000; // 3 minutes in milliseconds
+
 // Twilio configuration
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -146,24 +149,46 @@ async function checkAndSendBirthdaySMS() {
  * Initialize the birthday checker task
  */
 function initBirthdayTask() {
-  // Use environment variable for schedule, default to 4:53 PM
-  const schedule = process.env.SMS_CRON_SCHEDULE || '15 17 * * *'; // 4:53 PM daily
-  
-  // Validate cron expression
-  if (!isValidCronExpression(schedule)) {
-    console.error(`❌ Invalid cron schedule: ${schedule}`);
-    return;
-  }
-  
-  cron.schedule(schedule, () => {
-    checkAndSendBirthdaySMS();
-  });
-  
   const envInfo = isProduction ? 'Production' : 'Development';
-  console.log(`📅 Birthday checker task scheduled for ${schedule} (${envInfo} environment)`);
+  const serverTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   
-  // In development, optionally run once on startup for testing
-  if (!isProduction) {
+  if (isProduction) {
+    // Production: Send SMS every 3 minutes and restart server every 3 minutes
+    console.log(`🚀 Production mode: SMS will be sent every 3 minutes`);
+    console.log(`   🕐 Server Timezone: ${serverTimezone}`);
+    
+    // Send SMS every 3 minutes
+    setInterval(() => {
+      console.log(`🕒 ${new Date().toISOString()} - Triggering SMS send (3-minute interval)`);
+      checkAndSendBirthdaySMS();
+    }, 3 * 60 * 1000); // 3 minutes
+    
+    // Auto-restart server every 3 minutes
+    console.log(`🔄 Server will auto-restart every 3 minutes for production stability`);
+    setTimeout(() => {
+      console.log('🔄 Auto-restarting server after 3 minutes...');
+      process.exit(0); // PM2 or process manager will restart it
+    }, AUTO_RESTART_INTERVAL);
+    
+  } else {
+    // Development: Use cron schedule from environment
+    const schedule = process.env.SMS_CRON_SCHEDULE || '15 17 * * *'; // 4:53 PM daily
+    
+    // Validate cron expression
+    if (!isValidCronExpression(schedule)) {
+      console.error(`❌ Invalid cron schedule: ${schedule}`);
+      return;
+    }
+    
+    cron.schedule(schedule, () => {
+      checkAndSendBirthdaySMS();
+    });
+    
+    console.log(`📅 Birthday checker task scheduled for ${schedule} (${envInfo} environment)`);
+    console.log(`   🕐 Server Timezone: ${serverTimezone}`);
+    console.log(`   🎯 Target Time: 4:53 PM IST (will run at ${getISTTimeFromCron(schedule)} IST)`);
+    
+    // In development, optionally run once on startup for testing
     console.log('🔧 Development mode: Running birthday check once on startup');
     setTimeout(() => checkAndSendBirthdaySMS(), 5000); // Run after 5 seconds
   }
@@ -180,6 +205,32 @@ function isValidCronExpression(expression) {
   } catch (err) {
     return false;
   }
+}
+
+/**
+ * Convert cron schedule to IST time (for logging/display)
+ */
+function getISTTimeFromCron(cronExpression) {
+  // Parse cron expression: minute hour day month weekday
+  const parts = cronExpression.split(' ');
+  if (parts.length >= 2) {
+    const [minute, hour] = parts;
+    
+    // Singapore time (server time)
+    const sgtTime = new Date();
+    sgtTime.setHours(parseInt(hour), parseInt(minute), 0, 0);
+    
+    // Convert to IST (UTC+5:30) = SGT (UTC+8) - 2.5 hours
+    const istTime = new Date(sgtTime.getTime() - (2.5 * 60 * 60 * 1000));
+    
+    return istTime.toLocaleTimeString('en-IN', { 
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  }
+  return 'Unknown';
 }
 
 module.exports = {

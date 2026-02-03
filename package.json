@@ -8,7 +8,11 @@
     "dev": "nodemon server.js",
     "kill": "powershell -Command \"Get-NetTCPConnection -LocalPort 5000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }\"",
     "restart": "npm run kill && timeout /t 2 /nobreak >nul 2>&1 && npm start",
-    "test:sms": "node scripts/sms-health-check.js"
+    "test:sms": "node scripts/sms-health-check.js",
+    "timezone": "node scripts/timezone-converter.js",
+    "production:start": "NODE_ENV=production node scripts/production-manager.js & node server.js",
+    "production:monitor": "node scripts/production-manager.js",
+    "test:production": "node scripts/test-production.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.980.0",

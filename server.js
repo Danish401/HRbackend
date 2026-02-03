@@ -286,14 +286,25 @@ const PORT = process.env.PORT || 5000;
 
 // Start server IMMEDIATELY (don't wait for MongoDB or other services)
 server.listen(PORT, () => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+  
+  if (isProduction) {
+    console.log(`   🚀 Production mode: SMS every 3 minutes, auto-restart every 3 minutes`);
+    console.log(`   📊 Monitoring: Check logs/production.log for restart information`);
+  } else {
+    console.log(`   🔧 Development mode: Using cron schedule for SMS`);
+  }
+  
   console.log(`\n📋 Available API endpoints:`);
   console.log(`   POST http://localhost:${PORT}/api/resumes/upload`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/stats/count`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/test-upload-route`);
-  console.log(`   GET  http://localhost:${PORT}/api/health\n`);
+  console.log(`   GET  http://localhost:${PORT}/api/health`);
+  console.log(`   GET  http://localhost:${PORT}/api/test-sms (testing only)\n`);
   console.log(`✅ Server is ready to accept requests (background services loading...)\n`);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
