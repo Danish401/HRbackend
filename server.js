@@ -251,8 +251,30 @@ app.get('/api/health', (req, res) => {
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     timestamp: new Date(),
     uptime: process.uptime(),
-    memory: process.memoryUsage()
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV || 'development'
   });
+});
+
+// SMS Test endpoint (REMOVE IN PRODUCTION or protect with auth)
+app.get('/api/test-sms', async (req, res) => {
+  try {
+    console.log('🧪 SMS test endpoint called');
+    const smsService = require('./services/smsService');
+    await smsService.checkAndSendBirthdaySMS();
+    res.json({ 
+      success: true, 
+      message: 'SMS test completed successfully',
+      timestamp: new Date()
+    });
+  } catch (error) {
+    console.error('❌ SMS test failed:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      timestamp: new Date()
+    });
+  }
 });
 
 // Quick ping endpoint for load balancers

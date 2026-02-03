@@ -3,11 +3,15 @@ const Email = require('../models/Resume'); // Default export is Email model
 const { Resume } = require('../models/Resume'); // Named export is Resume model
 const cron = require('node-cron');
 
+// Environment check
+const isProduction = process.env.NODE_ENV === 'production';
+
 // Twilio configuration
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
-const recipientNumber = '+917009236647'; // Added country code for Twilio
+// Recipient configuration - can be overridden by environment variable
+const recipientNumber = process.env.SMS_RECIPIENT_NUMBER || '+917009236647';
 
 let client;
 if (accountSid && authToken) {
@@ -99,7 +103,14 @@ async function checkAndSendBirthdaySMS() {
 
     // Send via Twilio
     if (!client) {
-      console.error('❌ Twilio client not initialized. Check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env');
+      const errorMsg = '❌ Twilio client not initialized. Check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env';
+      if (isProduction) {
+        console.error(errorMsg);
+        // In production, you might want to send an alert to admin
+        // sendAdminAlert('SMS Service Error', errorMsg);
+      } else {
+        console.error(errorMsg);
+      }
       return;
     }
 
@@ -109,25 +120,66 @@ async function checkAndSendBirthdaySMS() {
       to: recipientNumber
     });
 
-    console.log(`✅ Birthday SMS sent! SID: ${response.sid}`);
+    const successMsg = `✅ Birthday SMS sent! SID: ${response.sid}`;
+    if (isProduction) {
+      console.log(successMsg);
+      // Log to file or external service in production
+      // logToExternalService('SMS_SENT', { sid: response.sid, recipient: recipientNumber });
+    } else {
+      console.log(successMsg);
+    }
   } catch (error) {
-    console.error('❌ Error in checkAndSendBirthdaySMS:', error.message);
+    const errorMsg = `❌ Error in checkAndSendBirthdaySMS: ${error.message}`;
+    if (isProduction) {
+      console.error(errorMsg);
+      console.error('Error stack:', error.stack);
+      // In production, send alert to admin or monitoring service
+      // sendAdminAlert('SMS Service Critical Error', errorMsg);
+    } else {
+      console.error(errorMsg);
+      console.error('Error details:', error);
+    }
   }
 }
 
 /**
- * Initialize the birthday checker task (Runs at 9:00 AM every day)
+ * Initialize the birthday checker task
  */
 function initBirthdayTask() {
-  // Schedule to run at 4:11 PM (16:11) daily
-  cron.schedule('11 16 * * *', () => {
+  // Use environment variable for schedule, default to 4:53 PM
+  const schedule = process.env.SMS_CRON_SCHEDULE || '15 17 * * *'; // 4:53 PM daily
+  
+  // Validate cron expression
+  if (!isValidCronExpression(schedule)) {
+    console.error(`❌ Invalid cron schedule: ${schedule}`);
+    return;
+  }
+  
+  cron.schedule(schedule, () => {
     checkAndSendBirthdaySMS();
   });
   
-  console.log('📅 Birthday checker task scheduled for 04:11 PM daily');
+  const envInfo = isProduction ? 'Production' : 'Development';
+  console.log(`📅 Birthday checker task scheduled for ${schedule} (${envInfo} environment)`);
   
-  // Optional: Run once on startup for testing if needed
-  // checkAndSendBirthdaySMS(); 
+  // In development, optionally run once on startup for testing
+  if (!isProduction) {
+    console.log('🔧 Development mode: Running birthday check once on startup');
+    setTimeout(() => checkAndSendBirthdaySMS(), 5000); // Run after 5 seconds
+  }
+}
+
+/**
+ * Validate cron expression
+ */
+function isValidCronExpression(expression) {
+  try {
+    // Simple validation - try to create a cron job
+    const validateCron = require('node-cron');
+    return validateCron.validate(expression);
+  } catch (err) {
+    return false;
+  }
 }
 
 module.exports = {
