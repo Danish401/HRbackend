@@ -630,6 +630,8 @@ async function markAsProcessed(uid) {
  * Start email monitoring for all configured accounts
  */
 async function startMonitoring(io) {
+  console.log('\n🚀 Initializing email monitoring...');
+  
   const configs = [];
   
   // Primary/Gmail Account
@@ -663,11 +665,13 @@ async function startMonitoring(io) {
     return;
   }
 
+  // Start each account monitoring with timeout protection (non-blocking)
   for (const account of configs) {
-    await startAccountMonitoring(account, io);
+    // Don't await - start them in parallel and continue
+    startAccountMonitoringWithTimeout(account, io);
   }
 
-  // Also start Microsoft Graph API polling if configured
+  // Also start Microsoft Graph API polling if configured (non-blocking)
   if (process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID) {
     console.log(`\n🚀 [Outlook-Graph] Starting Microsoft Graph API polling...`);
     
@@ -686,8 +690,44 @@ async function startMonitoring(io) {
       }
     });
 
-    // Run initial fetch immediately
-    graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(console.error);
+    // Run initial fetch immediately (non-blocking)
+    setImmediate(() => {
+      graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
+        console.error('❌ [Outlook-Graph] Initial fetch error:', err.message);
+      });
+    });
+  }
+  
+  console.log('✅ Email monitoring initialization completed (connections starting in background)');
+}
+
+/**
+ * Start monitoring for a specific account (with timeout protection)
+ */
+async function startAccountMonitoringWithTimeout(account, io) {
+  const { name } = account;
+  const timeout = 30000; // 30 second timeout for connection
+  
+  console.log(`\n🚀 [${name}] Initializing account monitoring...`);
+  
+  const connectionTimeout = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error('Connection timeout')), timeout)
+  );
+  
+  try {
+    await Promise.race([
+      startAccountMonitoring(account, io),
+      connectionTimeout
+    ]);
+  } catch (err) {
+    console.error(`\n❌ [${name}] Failed to start monitoring (non-fatal):`, err.message);
+    console.log(`   [${name}] Server will continue without this account`);
+    
+    // Retry after 60 seconds (in background)
+    setTimeout(() => {
+      console.log(`\n🔄 [${name}] Retrying connection...`);
+      startAccountMonitoringWithTimeout(account, io);
+    }, 60000);
   }
 }
 

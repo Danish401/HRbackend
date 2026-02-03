@@ -71,10 +71,15 @@ console.log(`   URI: ${maskedURI}`);
 
 const connectWithRetry = () => {
   console.log('🔄 MongoDB connection attempt...');
+  
+  // Shorter timeouts for production to fail fast if DB is unavailable
+  const isProduction = process.env.NODE_ENV === 'production';
+  const timeoutMs = isProduction ? 5000 : 10000;
+  
   mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 10000,
+    serverSelectionTimeoutMS: timeoutMs,
     socketTimeoutMS: 45000,
-    connectTimeoutMS: 10000,
+    connectTimeoutMS: timeoutMs,
     maxPoolSize: 10,
     minPoolSize: 1,
   })
@@ -90,17 +95,29 @@ const connectWithRetry = () => {
       console.error('Error invoking ensureDefaultAdmin:', e);
     }
 
-    // Start background services only after successful DB connection
-    console.log('🚀 Starting background services...');
+    // Start background services ASYNCHRONOUSLY (don't block)
+    console.log('🚀 Starting background services (non-blocking)...');
     
-    // Start email monitoring
-    emailService.startMonitoring(io);
+    // Start email monitoring (async, don't await)
+    setImmediate(() => {
+      emailService.startMonitoring(io).catch(err => {
+        console.error('⚠️ Email monitoring failed to start:', err.message);
+      });
+    });
 
-    // Initialize birthday checker task
-    smsService.initBirthdayTask();
+    // Initialize birthday checker task (lightweight)
+    try {
+      smsService.initBirthdayTask();
+    } catch (err) {
+      console.error('⚠️ Birthday task failed to start:', err.message);
+    }
 
-    // Start Redis queue processor
-    startQueueProcessor();
+    // Start Redis queue processor (async, don't await)
+    setImmediate(() => {
+      startQueueProcessor();
+    });
+    
+    console.log('✅ Background services initiated (running in background)');
   })
   .catch(err => {
     console.error('\n❌ MongoDB connection FAILED!');
@@ -186,12 +203,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// Initialize Redis
-redisService.initializeRedis().then(() => {
-  console.log('✅ Redis initialized');
-}).catch(err => {
-  console.warn('⚠️  Redis initialization failed, continuing without Redis:', err.message);
-});
+// Initialize Redis (non-blocking, with timeout)
+const initRedisWithTimeout = async () => {
+  const timeout = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error('Redis initialization timeout')), 5000)
+  );
+  
+  try {
+    await Promise.race([
+      redisService.initializeRedis(),
+      timeout
+    ]);
+    console.log('✅ Redis initialized');
+  } catch (err) {
+    console.warn('⚠️ Redis initialization failed, continuing without Redis:', err.message);
+  }
+};
+
+initRedisWithTimeout();
 
 // Start Redis queue processor (processes jobs from queue)
 async function startQueueProcessor() {
@@ -220,20 +249,30 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'Server is running', 
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    timestamp: new Date() 
+    timestamp: new Date(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
   });
+});
+
+// Quick ping endpoint for load balancers
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
 });
 
 const PORT = process.env.PORT || 5000;
 
+// Start server IMMEDIATELY (don't wait for MongoDB or other services)
 server.listen(PORT, () => {
   console.log(`\n✅ Server running on port ${PORT}`);
+  console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`\n📋 Available API endpoints:`);
   console.log(`   POST http://localhost:${PORT}/api/resumes/upload`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/stats/count`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/test-upload-route`);
   console.log(`   GET  http://localhost:${PORT}/api/health\n`);
+  console.log(`✅ Server is ready to accept requests (background services loading...)\n`);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n⚠️  Port ${PORT} is already in use!`);
