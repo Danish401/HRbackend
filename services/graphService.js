@@ -28,9 +28,12 @@ const cca = new msal.ConfidentialClientApplication(msalConfig);
  * Get the Authorization URL for the user to visit
  */
 function getAuthUrl() {
+  const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
+    `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
+  
   const authCodeUrlParameters = {
     scopes: ['offline_access', 'User.Read', 'Mail.Read'],
-    redirectUri: `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`,
+    redirectUri: redirectUri,
   };
 
   return cca.getAuthCodeUrl(authCodeUrlParameters);
@@ -40,10 +43,13 @@ function getAuthUrl() {
  * Exchange Authorization Code for Tokens
  */
 async function redeemCode(code) {
+  const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
+    `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
+  
   const tokenRequest = {
     code: code,
     scopes: ['offline_access', 'User.Read', 'Mail.Read'],
-    redirectUri: `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`,
+    redirectUri: redirectUri,
   };
 
   try {
@@ -132,7 +138,10 @@ async function fetchOutlookMessages(userId, io) {
       accessToken = await getValidToken(userId);
     } catch (tokenErr) {
       console.warn(`⚠️ [Outlook-Graph] ${tokenErr.message}`);
-      console.log(`👉 Please authorize at: http://localhost:${process.env.PORT || 5000}/api/outlook-auth/login`);
+      const authUrl = process.env.MS_GRAPH_REDIRECT_URI ? 
+        process.env.MS_GRAPH_REDIRECT_URI.replace('/callback', '/login') : 
+        `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/login`;
+      console.log(`👉 Please authorize at: ${authUrl}`);
       return;
     }
 
