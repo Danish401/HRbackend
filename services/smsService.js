@@ -176,8 +176,8 @@ function initBirthdayTask() {
   const serverTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   
   if (isProduction) {
-    // Production: Send SMS every 3 minutes and restart server every 3 minutes
-    console.log(`🚀 Production mode: SMS will be sent every 3 minutes`);
+    // Production: Send SMS every 3 minutes but restart server every 5 minutes
+    console.log(`🚀 Production mode: SMS will be sent every 3 minutes, server restarts every ${AUTO_RESTART_INTERVAL/60000} minutes`);
     console.log(`   🕐 Server Timezone: ${serverTimezone}`);
     
     // Send SMS every 3 minutes
@@ -186,12 +186,8 @@ function initBirthdayTask() {
       checkAndSendBirthdaySMS();
     }, 3 * 60 * 1000); // 3 minutes
     
-    // Auto-restart server every 3 minutes
-    console.log(`🔄 Server will auto-restart every 3 minutes for production stability`);
-    setTimeout(() => {
-      console.log('🔄 Auto-restarting server after 3 minutes...');
-      process.exit(0); // PM2 or process manager will restart it
-    }, AUTO_RESTART_INTERVAL);
+    // Note: Server auto-restart is handled by production-manager.js script
+    console.log(`ℹ️  Server auto-restart is handled by production-manager.js`);
     
   } else {
     // Development: Use cron schedule from environment

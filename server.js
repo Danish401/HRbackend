@@ -112,10 +112,6 @@ const connectWithRetry = () => {
       console.error('⚠️ Birthday task failed to start:', err.message);
     }
 
-    // Start Redis queue processor (async, don't await)
-    setImmediate(() => {
-      startQueueProcessor();
-    });
     
     console.log('✅ Background services initiated (running in background)');
   })
@@ -222,27 +218,7 @@ const initRedisWithTimeout = async () => {
 
 initRedisWithTimeout();
 
-// Start Redis queue processor (processes jobs from queue)
-async function startQueueProcessor() {
-  const queueName = 'pdf_processing_queue';
-  
-  setInterval(async () => {
-    try {
-      const job = await redisService.getFromQueue(queueName);
-      if (job) {
-        console.log(`📦 Processing queued job: ${job.type}`);
-        // Process the job based on type
-        // This can be extended to handle different job types
-        if (job.type === 'process_pdf') {
-          // Job processing logic can be added here
-          console.log(`✅ Processed queued PDF job: ${job.id}`);
-        }
-      }
-    } catch (error) {
-      console.error('❌ Error processing queue:', error.message);
-    }
-  }, 5000); // Check queue every 5 seconds
-}
+// NOTE: Removed unused queue processor since no actual job processing logic was implemented
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -256,8 +232,28 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// SMS Test endpoint (REMOVE IN PRODUCTION or protect with auth)
+// SMS Test endpoint (protected with basic auth)
 app.get('/api/test-sms', async (req, res) => {
+  // Check for basic auth header
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Authorization header required'
+    });
+  }
+  
+  const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+  const expectedToken = process.env.SMS_TEST_TOKEN || process.env.JWT_SECRET;
+  
+  if (!expectedToken || token !== expectedToken) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Invalid authorization token'
+    });
+  }
+  
   try {
     console.log('🧪 SMS test endpoint called');
     const smsService = require('./services/smsService');
@@ -304,7 +300,7 @@ server.listen(PORT, () => {
   console.log(`   GET  http://localhost:${PORT}/api/resumes/stats/count`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/test-upload-route`);
   console.log(`   GET  http://localhost:${PORT}/api/health`);
-  console.log(`   GET  http://localhost:${PORT}/api/test-sms (testing only)\n`);
+  console.log(`   GET  http://localhost:${PORT}/api/test-sms (testing only - requires auth token)\n`);
   console.log(`✅ Server is ready to accept requests (background services loading...)\n`);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
