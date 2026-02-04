@@ -380,6 +380,7 @@ router.get('/download/:id', async (req, res) => {
     if (email.attachmentData && (email.attachmentData.s3Url || email.attachmentData.s3Key)) {
       console.log(`☁️  PDF linked to AWS S3: ${email.attachmentData.s3Url}`);
       
+      // Try direct S3 SDK access first
       try {
         const s3Key = email.attachmentData.s3Key;
         if (s3Key) {
@@ -401,8 +402,74 @@ router.get('/download/:id', async (req, res) => {
           }
         }
       } catch (s3Error) {
-        console.error(`❌ AWS S3 error: ${s3Error.message}`);
-        console.error(`   Falling back to alternative methods...`);
+        console.error(`❌ AWS S3 SDK error: ${s3Error.message}`);
+        console.error(`   Falling back to HTTP download from S3 URL...`);
+      }
+      
+      // Fallback: Try presigned URL approach
+      try {
+        const s3Key = email.attachmentData.s3Key;
+        if (s3Key) {
+          // Generate presigned URL for 15 minutes
+          const { GetObjectCommand, getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+          
+          const command = new GetObjectCommand({
+            Bucket: bucketName,
+            Key: s3Key,
+          });
+          
+          const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 }); // 15 minutes
+          console.log(`🔗 Generated presigned URL for S3 object`);
+          
+          const pdfBuffer = await fetchFromUrl(signedUrl);
+          
+          if (pdfBuffer) {
+            console.log(`✅ Successfully downloaded PDF via presigned URL`);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Content-Length', pdfBuffer.length);
+            res.send(pdfBuffer);
+            return;
+          }
+        }
+      } catch (presignError) {
+        console.error(`❌ Presigned URL generation failed: ${presignError.message}`);
+        
+        // Final fallback: Try direct HTTP with potential URL fixes
+        try {
+          const s3Url = email.attachmentData.s3Url;
+          if (s3Url) {
+            // Try both original and common URL variations
+            const urlsToTry = [
+              s3Url,
+              s3Url.replace('resumeyourhrpower-resumes.s3.ap-south-1.amazonaws.com', 
+                           'resumeyourhrpower-resumes.s3.amazonaws.com')
+            ];
+            
+            console.log(`📥 Attempting HTTP download from S3 URLs:`);
+            
+            for (const url of urlsToTry) {
+              try {
+                console.log(`   Trying: ${url}`);
+                const pdfBuffer = await fetchFromUrl(url);
+                if (pdfBuffer) {
+                  console.log(`✅ Successfully downloaded PDF via HTTP from S3`);
+                  res.setHeader('Content-Type', 'application/pdf');
+                  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+                  res.setHeader('Content-Length', pdfBuffer.length);
+                  res.send(pdfBuffer);
+                  return;
+                }
+              } catch (urlError) {
+                console.warn(`⚠️  Failed for ${url}: ${urlError.message}`);
+              }
+            }
+          }
+        } catch (httpError) {
+          console.error(`❌ HTTP download from S3 failed: ${httpError.message}`);
+        }
+        
+        console.error(`   All S3 download methods exhausted, falling back to alternative methods...`);
       }
     }
 
