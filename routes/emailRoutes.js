@@ -697,6 +697,32 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// Debug endpoint to check Outlook token status
+router.get('/outlook-status', async (req, res) => {
+  try {
+    const userId = process.env.MS_GRAPH_USER_ID;
+    if (!userId) {
+      return res.status(400).json({ error: 'MS_GRAPH_USER_ID not configured' });
+    }
+    
+    const graphService = require('../services/graphService');
+    const status = await graphService.checkTokenStatus(userId);
+    
+    res.json({
+      userId: userId,
+      tokenStatus: status,
+      config: {
+        clientId: process.env.MS_GRAPH_CLIENT_ID ? '***' + process.env.MS_GRAPH_CLIENT_ID.slice(-4) : null,
+        tenantId: process.env.MS_GRAPH_TENANT_ID,
+        redirectUri: process.env.MS_GRAPH_REDIRECT_URI
+      }
+    });
+  } catch (error) {
+    console.error('Error checking Outlook status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Add resume from URL
 router.post('/add-from-url', async (req, res) => {
   try {
