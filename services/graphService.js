@@ -17,8 +17,12 @@ const Token = require('../models/Token');
 const msalConfig = {
   auth: {
     clientId: process.env.MS_GRAPH_CLIENT_ID,
-    authority: `https://login.microsoftonline.com/common`, // Use 'common' for personal + work accounts
+    authority: `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`, // Use specific tenant or 'common' for personal + work accounts
     clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+  },
+  // Cache configuration to handle token refresh properly
+  cache: {
+    // You can add cache configuration here if needed
   }
 };
 
@@ -28,11 +32,12 @@ const cca = new msal.ConfidentialClientApplication(msalConfig);
  * Get the Authorization URL for the user to visit
  */
 function getAuthUrl() {
+  // Ensure we always use the configured redirect URI, with fallback to localhost
   const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
   
   const authCodeUrlParameters = {
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
     redirectUri: redirectUri,
   };
 
@@ -43,12 +48,13 @@ function getAuthUrl() {
  * Exchange Authorization Code for Tokens
  */
 async function redeemCode(code) {
+  // Ensure we always use the configured redirect URI, with fallback to localhost
   const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
   
   const tokenRequest = {
     code: code,
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
     redirectUri: redirectUri,
   };
 
@@ -92,16 +98,24 @@ async function getValidToken(accountEmail) {
 
   console.log(`🔄 Refreshing token for ${accountEmail}...`);
 
+  // Use the same redirect URI that was used for the original authorization
+  const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
+    `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
+  
   const refreshTokenRequest = {
     refreshToken: tokenRecord.refreshToken,
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
+    redirectUri: redirectUri, // Include redirectUri in refresh request for better compatibility
   };
 
   try {
     const response = await cca.acquireTokenByRefreshToken(refreshTokenRequest);
     
     tokenRecord.accessToken = response.accessToken;
-    if (response.refreshToken) tokenRecord.refreshToken = response.refreshToken;
+    // Only update refresh token if Microsoft provided a new one
+    if (response.refreshToken) {
+      tokenRecord.refreshToken = response.refreshToken;
+    }
     tokenRecord.expiresAt = response.expiresOn;
     tokenRecord.updatedAt = new Date();
     await tokenRecord.save();
@@ -109,6 +123,17 @@ async function getValidToken(accountEmail) {
     return response.accessToken;
   } catch (error) {
     console.error('❌ Error refreshing Outlook token:', error.message);
+    
+    // If the refresh token is invalid (expired or revoked), the user needs to re-authorize
+    if (error.errorCode === 'invalid_grant' || error.message.includes('invalid_grant')) {
+      console.error(`❌ Refresh token for ${accountEmail} is invalid/expired. User needs to re-authorize.`);
+      
+      // Optionally delete the invalid token record so user can re-authenticate
+      await Token.deleteOne({ accountEmail: accountEmail.toLowerCase() });
+      
+      throw new Error(`Invalid refresh token for ${accountEmail}. Please re-authorize at the Outlook authentication endpoint.`);
+    }
+    
     throw error;
   }
 }
@@ -142,6 +167,15 @@ async function fetchOutlookMessages(userId, io) {
         process.env.MS_GRAPH_REDIRECT_URI.replace('/callback', '/login') : 
         `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/login`;
       console.log(`👉 Please authorize at: ${authUrl}`);
+      
+      // Emit an event to notify the frontend that reauthorization is needed
+      if (io) {
+        io.emit('tokenExpired', {
+          message: 'Outlook token expired. Please reauthorize.',
+          email: userId,
+          authUrl: authUrl
+        });
+      }
       return;
     }
 

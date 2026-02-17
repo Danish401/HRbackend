@@ -6,6 +6,7 @@ const fs = require('fs-extra');
 const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
 const { extractResumeData } = require('../services/pdfParser');
+
 const graphService = require('../services/graphService');
 const Email = require('../models/Resume');
 const { s3Client, bucketName } = require('../config/s3');
@@ -63,15 +64,16 @@ router.get('/callback', async (req, res) => {
 
   try {
     const email = await graphService.redeemCode(code);
-    res.send(`
-      <div style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-        <h1 style="color: #28a745;">✅ Authorization Successful!</h1>
-        <p>Outlook account <b>${email}</b> is now connected to ResumeExtractor.</p>
-        <p>You can close this window now.</p>
-      </div>
-    `);
+    
+    // Redirect to frontend with success indicator
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${frontendUrl}?outlook_auth=success&email=${encodeURIComponent(email)}`);
   } catch (error) {
-    res.status(500).send(`Error: ${error.message}`);
+    console.error('Outlook auth callback error:', error);
+    
+    // Redirect to frontend with error indicator
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${frontendUrl}?outlook_auth=error&message=${encodeURIComponent(error.message)}`);
   }
 });
 
@@ -173,7 +175,7 @@ async function processUploadedResume(file, req) {
     throw new Error('PDF file appears to be empty or could not be parsed');
   }
 
-  // Extract resume data
+  // Extract resume data using standard parser
   const extractedData = extractResumeData(pdfText);
   
   console.log('✓ Extracted data:', {
@@ -244,7 +246,7 @@ ${JSON.stringify(extractedData, null, 2)}`,
 
 // Upload multiple resume files (must be before /:id route)
 router.post('/upload', (req, res, next) => {
-  upload.array('resumes', 10)(req, res, (err) => {
+  upload.array('resumes', 1000)(req, res, (err) => {
     if (err) {
       console.error('❌ Multer upload error:', err);
       if (err instanceof multer.MulterError) {

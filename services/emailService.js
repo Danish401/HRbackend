@@ -16,6 +16,7 @@ try {
 
 const Email = require('../models/Resume');
 const { extractResumeData } = require('./pdfParser');
+
 const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
 const redisService = require('./redisService');

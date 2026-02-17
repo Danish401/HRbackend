@@ -41,87 +41,148 @@ function extractResumeData(text) {
   
   // Strategy 1: Look for "Name:" or "Full Name:" patterns (case insensitive)
   const namePatterns1 = [
-    /(?:^|\n)\s*name\s*[:]\s*([^\n\r]+)/i,
-    /(?:^|\n)\s*full\s*name\s*[:]\s*([^\n\r]+)/i,
-    /name\s*[:]\s*([A-Za-z\s]+)/i,
-    /full\s*name\s*[:]\s*([A-Za-z\s]+)/i
+    /(?:^|\n)\s*name\s*[:=]?\s*([^\n\r]+)/i,
+    /(?:^|\n)\s*full\s*name\s*[:=]?\s*([^\n\r]+)/i,
+    /name\s*[:=]?\s*([A-Za-z\s]+)/i,
+    /full\s*name\s*[:=]?\s*([A-Za-z\s]+)/i,
+    /(?:^|\s)(?:mr\.?|mrs\.?|miss\.?|ms\.?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/i
   ];
   
   for (const pattern of namePatterns1) {
     const match = originalText.match(pattern);
     if (match && match[1]) {
-      data.name = match[1].trim();
-      console.log(`✓ Name found (pattern 1): "${data.name}"`);
-      break;
+      let extractedName = match[1].trim();
+      // Clean up the extracted name
+      extractedName = extractedName.replace(/^[=:\s]+|[=:\s]+$/, '').trim();
+      if (extractedName.length > 1 && extractedName.length < 100) { // Reasonable name length
+        data.name = extractedName;
+        console.log(`✓ Name found (pattern 1): "${data.name}"`);
+        break;
+      }
     }
   }
 
   // Strategy 2: Look for all-caps name at the start (common in resumes)
-  // First check if first line is all caps (could be name even if single word)
-  if (!data.name && lines.length > 0) {
-    const firstLine = lines[0];
-    // Check if first line is all uppercase letters (could be "DANISHALI" or "DANISH ALI")
-    if (firstLine === firstLine.toUpperCase() && /^[A-Z]+$/.test(firstLine.replace(/\s/g, ''))) {
-      // If it's a single word, try to split it intelligently (e.g., "DANISHALI" -> "DANISH ALI")
-      if (firstLine.length > 5 && firstLine.length < 30) {
-        // Try to detect if it's two names combined (common pattern)
-        // Look for patterns like "DANISHALI" where we can split
-        const splitPattern = /^([A-Z]{3,})([A-Z]{3,})$/;
-        const splitMatch = firstLine.match(splitPattern);
-        if (splitMatch) {
-          data.name = `${splitMatch[1]} ${splitMatch[2]}`;
-          console.log(`✓ Name found (all caps single word, split): "${data.name}"`);
-        } else {
-          data.name = firstLine;
-          console.log(`✓ Name found (all caps first line): "${data.name}"`);
+  // First check if first few lines are all caps (could be name even if single word)
+  if (!data.name) {
+    for (let i = 0; i < Math.min(3, lines.length); i++) {
+      const line = lines[i];
+      // Check if line is all uppercase and 2-4 words
+      if (line === line.toUpperCase() && line.length > 2 && line.length < 50) {
+        const words = line.split(/\s+/);
+        if (words.length >= 1 && words.length <= 4 && /^[A-Z\s\.\-]+$/.test(line)) {
+          // Additional check: ensure it doesn't look like a job title or other header
+          const lowerLine = line.toLowerCase();
+          const excludeKeywords = ['last updated', 'updated', 'resume', 'cv', 'curriculum', 'vitae', 'contact', 'information', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects'];
+          
+          if (!excludeKeywords.some(keyword => lowerLine.includes(keyword))) {
+            data.name = line;
+            console.log(`✓ Name found (all caps line ${i}): "${data.name}"`);
+            break;
+          }
         }
       }
     }
   }
 
-  // Strategy 2b: Look for all-caps name with spaces at the start
+  // Strategy 2b: Look for capitalized words at the start (2-4 words, all capitalized)
   if (!data.name) {
     for (let i = 0; i < Math.min(5, lines.length); i++) {
       const line = lines[i];
-      // Check if line is all uppercase and 2-4 words
-      if (line === line.toUpperCase() && line.length > 5 && line.length < 50) {
-        const words = line.split(/\s+/);
-        if (words.length >= 2 && words.length <= 4 && /^[A-Z\s]+$/.test(line)) {
-          data.name = line;
-          console.log(`✓ Name found (all caps with spaces, line ${i}): "${data.name}"`);
-          break;
+      const words = line.split(/\s+/);
+      
+      // Check if line has 1-4 words and all start with capital letters
+      if (words.length >= 1 && words.length <= 4) {
+        const allCapitalized = words.every(word => 
+          word.length > 0 && /^[A-Z]/.test(word) && /^[A-Za-z\-\.]+$/.test(word)
+        );
+        if (allCapitalized && /^[A-Za-z\s\-\.]+$/.test(line)) {
+          // Additional check: ensure it doesn't look like a job title or other header
+          const lowerLine = line.toLowerCase();
+          const excludeKeywords = ['last updated', 'updated', 'resume', 'cv', 'curriculum', 'vitae', 'contact', 'information', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects'];
+          
+          if (!excludeKeywords.some(keyword => lowerLine.includes(keyword))) {
+            data.name = line;
+            console.log(`✓ Name found (capitalized, line ${i}): "${data.name}"`);
+            break;
+          }
         }
       }
     }
   }
 
-  // Strategy 3: Look for capitalized words at the start (2-4 words, all capitalized)
+  // Strategy 3: Look for common name patterns (First Last format) in first few lines
   if (!data.name) {
     for (let i = 0; i < Math.min(10, lines.length); i++) {
       const line = lines[i];
-      const words = line.split(/\s+/);
-      
-      // Check if line has 2-4 words and all start with capital letters
-      if (words.length >= 2 && words.length <= 4) {
-        const allCapitalized = words.every(word => 
-          word.length > 0 && /^[A-Z]/.test(word) && /^[A-Za-z]+$/.test(word)
-        );
-        if (allCapitalized && /^[A-Za-z\s]+$/.test(line)) {
-          data.name = line;
-          console.log(`✓ Name found (capitalized, line ${i}): "${data.name}"`);
+      // Look for First Last pattern in the line
+      const namePattern = /([A-Z][a-z]+(?:\s+[A-Z][a-z]*){1,3})/;
+      const match = line.match(namePattern);
+      if (match && match[1]) {
+        const extractedName = match[1].trim();
+        // Additional validation: check if it's not a job title
+        const lowerName = extractedName.toLowerCase();
+        const excludeKeywords = ['last updated', 'updated', 'resume', 'cv', 'curriculum', 'vitae', 'contact', 'information', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects'];
+        
+        if (!excludeKeywords.some(keyword => lowerName.includes(keyword)) && extractedName.length > 3 && extractedName.length < 50) {
+          data.name = extractedName;
+          console.log(`✓ Name found (First Last pattern, line ${i}): "${data.name}"`);
           break;
         }
       }
     }
   }
 
-  // Strategy 4: Look for common name patterns (First Last format)
+  // Strategy 4: Enhanced pattern matching with more name variations
   if (!data.name) {
-    const namePattern = /^([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/m;
-    const match = originalText.match(namePattern);
-    if (match && match[1]) {
-      data.name = match[1].trim();
-      console.log(`✓ Name found (pattern 4): "${data.name}"`);
+    const advancedNamePatterns = [
+      // Patterns with common name prefixes
+      /(?:\bby\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})(?=\s+(?:contact|email|phone|mobile|linkedin|github|address|summary|objective|profile|experience|education|skills))/i,
+      // Patterns with common contact info nearby
+      /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}).*?(?:email|e-mail|mail|contact|phone|mobile|linkedin|github|address)/i,
+      // Patterns with contact info before name
+      /(email|e-mail|mail|phone|mobile|linkedin|github|address).*?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/i,
+    ];
+    
+    for (const pattern of advancedNamePatterns) {
+      const match = originalText.match(pattern);
+      if (match && match[1]) {
+        const extractedName = (match[2] || match[1]).trim();
+        // Validate the extracted name
+        if (extractedName.length > 3 && extractedName.length < 50 && !extractedName.toLowerCase().includes('last updated')) {
+          data.name = extractedName;
+          console.log(`✓ Name found (advanced pattern): "${data.name}"`);
+          break;
+        }
+      }
+    }
+  }
+
+  // Strategy 5: Look for names near contact information
+  if (!data.name) {
+    // Find positions of contact-related keywords
+    const contactKeywords = ['email', 'phone', 'mobile', 'contact', 'linkedin', 'github', 'address'];
+    for (const keyword of contactKeywords) {
+      const keywordIndex = originalText.toLowerCase().indexOf(keyword);
+      if (keywordIndex !== -1) {
+        // Look for a name-like pattern before the contact info
+        const beforeText = originalText.substring(Math.max(0, keywordIndex - 100), keywordIndex);
+        const linesBefore = beforeText.split(/\r?\n/).reverse();
+        
+        for (const line of linesBefore) {
+          const nameMatch = line.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/);
+          if (nameMatch && nameMatch[1]) {
+            const extractedName = nameMatch[1].trim();
+            if (extractedName.length > 3 && extractedName.length < 50 && !extractedName.toLowerCase().includes('last updated')) {
+              data.name = extractedName;
+              console.log(`✓ Name found (near contact info): "${data.name}"`);
+              break;
+            }
+          }
+        }
+        
+        if (data.name) break;
+      }
     }
   }
 
@@ -144,14 +205,26 @@ function extractResumeData(text) {
       .map(email => email.toLowerCase().trim())
       .filter(email => {
         // Filter out common false positives
-        const falsePositives = ['example.com', 'email.com', 'test.com', 'domain.com'];
+        const falsePositives = ['example.com', 'email.com', 'test.com', 'domain.com', 'company.com', 'business.com'];
         const domain = email.split('@')[1];
         return !falsePositives.some(fp => domain.includes(fp));
+      })
+      .filter(email => {
+        // Additional filtering: avoid email addresses that look like template placeholders
+        return !email.includes('${') && !email.includes('{') && !email.includes('}') && email.length > 6;
       });
     
     if (emailMatches.length > 0) {
-      // Use the first valid email (could be enhanced to prioritize personal emails over company)
-      data.email = emailMatches[0];
+      // Prioritize personal emails over business ones if multiple found
+      const personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'protonmail.com', 'aol.com'];
+      const personalEmails = emailMatches.filter(email => personalDomains.some(domain => email.includes(domain)));
+      
+      if (personalEmails.length > 0) {
+        data.email = personalEmails[0];
+      } else {
+        data.email = emailMatches[0];
+      }
+      
       console.log(`✓ Email found: "${data.email}"`);
     }
   }
@@ -159,8 +232,9 @@ function extractResumeData(text) {
   // If still not found, try patterns with labels
   if (!data.email) {
     const emailWithLabelPatterns = [
-      /(?:email|e-mail|mail)\s*[:]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi,
-      /(?:email|e-mail|mail)\s*[=]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi
+      /(?:email|e-mail|mail)\s*[:=]?\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi,
+      /(?:contact\s*at|reach\s*at)\s*[:=]?\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi,
+      /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\s*(?:-\s*)?(?:email|contact|mail)/gi
     ];
     
     for (const pattern of emailWithLabelPatterns) {
@@ -179,9 +253,38 @@ function extractResumeData(text) {
     }
   }
 
+  // If still not found, look for emails near contact information
+  if (!data.email && lines.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lowerLine = line.toLowerCase();
+      
+      if (lowerLine.includes('contact') || lowerLine.includes('email') || lowerLine.includes('mail')) {
+        // Look in nearby lines for an email
+        const startIdx = Math.max(0, i - 2);
+        const endIdx = Math.min(lines.length, i + 3);
+        
+        for (let j = startIdx; j < endIdx; j++) {
+          const nearbyLine = lines[j];
+          const emailMatch = nearbyLine.match(emailRegex);
+          if (emailMatch && emailMatch[0]) {
+            const email = emailMatch[0].toLowerCase().trim();
+            const domain = email.split('@')[1];
+            if (domain && !['example.com', 'email.com', 'test.com', 'domain.com'].includes(domain)) {
+              data.email = email;
+              console.log(`✓ Email found (near contact info): "${data.email}"`);
+              break;
+            }
+          }
+        }
+        if (data.email) break;
+      }
+    }
+  }
+
   if (!data.email) {
     console.log('❌ Email not found');
-    console.log('  Attempted patterns: standard email regex, labeled patterns');
+    console.log('  Attempted patterns: standard email regex, labeled patterns, contact proximity');
   }
 
   // ========== EXTRACT CONTACT NUMBER ==========
@@ -204,7 +307,8 @@ function extractResumeData(text) {
   // Look for phone patterns with labels first (more reliable)
   const phoneWithLabelPatterns = [
     /(?:phone|mobile|contact|tel|telephone|cell|mob|whatsapp)\s*[:=]?\s*([+\d\s\-().]+)/gi,
-    /(?:ph|mob|tel)\s*[:=]?\s*([+\d\s\-().]+)/gi
+    /(?:ph|mob|tel)\s*[:=]?\s*([+\d\s\-().]+)/gi,
+    /([+\d\s\-().]+)\s*(?:-\s*)?(?:phone|mobile|contact|tel|telephone|cell|mob|whatsapp)/gi
   ];
   
   for (const pattern of phoneWithLabelPatterns) {
@@ -399,6 +503,67 @@ function extractResumeData(text) {
       }
     }
   }
+  
+  // Strategy 4: Look for roles near objective/summary section
+  if (!data.role) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].toLowerCase();
+      
+      if (line.includes('objective') || line.includes('summary') || line.includes('profile') || line.includes('about')) {
+        // Look for a role in the next few lines
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const nextLine = lines[j];
+          const words = nextLine.split(/\s+/);
+          
+          for (const word of words) {
+            const lowerWord = word.toLowerCase();
+            if (lowerWord.includes('engineer') || lowerWord.includes('developer') || 
+                lowerWord.includes('scientist') || lowerWord.includes('analyst') ||
+                lowerWord.includes('manager') || lowerWord.includes('architect') ||
+                lowerWord.includes('consultant') || lowerWord.includes('specialist')) {
+              // Extract the role from this line
+              const roleMatch = nextLine.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]*)*(?:\s+(?:engineer|developer|scientist|analyst|manager|architect|consultant|specialist|lead|senior|junior|associate))?)/);
+              if (roleMatch && roleMatch[1]) {
+                data.role = roleMatch[1].trim();
+                console.log(`✓ Role found (near objective): "${data.role}"`);
+                break;
+              }
+            }
+          }
+          if (data.role) break;
+        }
+        if (data.role) break;
+      }
+    }
+  }
+  
+  // Strategy 5: Extract role from the first substantial line that looks like a title
+  if (!data.role) {
+    for (let i = 0; i < Math.min(10, lines.length); i++) {
+      const line = lines[i];
+      const lowerLine = line.toLowerCase();
+      
+      // Skip if it looks like contact info
+      if (lowerLine.includes('contact') || lowerLine.includes('email') || lowerLine.includes('phone') || 
+          lowerLine.includes('linkedin') || lowerLine.includes('github')) {
+        continue;
+      }
+      
+      // Look for role keywords in the line
+      const roleKeywords = ['engineer', 'developer', 'scientist', 'analyst', 'manager', 'architect', 
+                           'consultant', 'specialist', 'lead', 'director', 'executive'];
+      
+      if (roleKeywords.some(keyword => lowerLine.includes(keyword))) {
+        // Extract the role from the line
+        const roleMatch = line.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]*)*(?:\s+(?:engineer|developer|scientist|analyst|manager|architect|consultant|specialist|lead|senior|junior|associate|director|executive))?)/);
+        if (roleMatch && roleMatch[1]) {
+          data.role = roleMatch[1].trim();
+          console.log(`✓ Role found (title-like line): "${data.role}"`);
+          break;
+        }
+      }
+    }
+  }
 
   if (!data.role) {
     console.log('❌ Role not found');
@@ -504,3 +669,5 @@ function extractResumeData(text) {
 module.exports = {
   extractResumeData
 };
+
+

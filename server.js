@@ -16,8 +16,8 @@ const io = socketIo(server, {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // For form data
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // For form data
 
 // Helper function to properly encode MongoDB connection string password
 function encodeMongoPassword(uri) {
@@ -151,6 +151,7 @@ mongoose.connection.on('connecting', () => {
 const emailRoutes = require('./routes/emailRoutes');
 const { router: authRoutes, ensureDefaultAdmin } = require('./routes/authRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const resumeRoutes = require('./routes/resumeRoutes');
 const emailService = require('./services/emailService');
 const smsService = require('./services/smsService');
 const { authenticate } = require('./middleware/auth');
@@ -167,6 +168,7 @@ const resumeUploadRoutes = require('./routes/resumeUploadRoutes');
 
 // Protected routes
 app.use('/api/resumes', authenticate, resumeUploadRoutes);
+app.use('/api/resumes', authenticate, resumeRoutes);
 app.use('/api/resumes', authenticate, emailRoutes);
 app.use('/api/emails', authenticate, emailRoutes);
 app.use('/api/notifications', authenticate, notificationRoutes);
@@ -179,6 +181,8 @@ console.log('   GET  /api/resumes/stats/count - Get count');
 console.log('   GET  /api/resumes/test-upload-route - Test route');
 console.log('   GET  /api/resumes/download/:id - Download PDF');
 console.log('   GET  /api/resumes/:id - Get single resume');
+console.log('   PUT  /api/resumes/:id/name - Update resume name');
+console.log('   PUT  /api/resumes/:id/details - Update all resume details');
 console.log('   DELETE /api/resumes/:id - Delete resume');
 
 // Socket.io connection
@@ -301,6 +305,8 @@ server.listen(PORT, () => {
   console.log(`   GET  http://localhost:${PORT}/api/resumes`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/stats/count`);
   console.log(`   GET  http://localhost:${PORT}/api/resumes/test-upload-route`);
+  console.log(`   PUT  http://localhost:${PORT}/api/resumes/:id/name`);
+  console.log(`   PUT  http://localhost:${PORT}/api/resumes/:id/details`);
   console.log(`   GET  http://localhost:${PORT}/api/health`);
   console.log(`   GET  http://localhost:${PORT}/api/test-sms (testing only - requires auth token)\n`);
   console.log(`✅ Server is ready to accept requests (background services loading...)\n`);
