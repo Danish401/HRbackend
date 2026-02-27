@@ -16,11 +16,13 @@ try {
 
 const Email = require('../models/Resume');
 const { extractResumeData } = require('./pdfParser');
+
 const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
 const redisService = require('./redisService');
 const tnef = require('node-tnef');
 const graphService = require('./graphService');
+const outlookEmailService = require('./outlookEmailService');
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, '../uploads');
@@ -675,24 +677,20 @@ async function startMonitoring(io) {
   if (process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID) {
     console.log(`\n🚀 [Outlook-Graph] Starting Microsoft Graph API polling...`);
     
-    const pollInterval = setInterval(async () => {
-      try {
-        await graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io);
-      } catch (err) {
-        console.error('❌ [Outlook-Graph] Polling error:', err.message);
-      }
-    }, 5 * 60 * 1000); // Poll every 5 minutes
+    // Use the new outlookEmailService for daily email fetching
+    const scheduledFetches = outlookEmailService.scheduleDailyEmailFetch(process.env.MS_GRAPH_USER_ID, io);
 
     monitoringInstances.push({
       name: 'Outlook-Graph',
       stop: async () => {
-        clearInterval(pollInterval);
+        clearInterval(scheduledFetches.interval);
+        clearInterval(scheduledFetches.checkMidnight);
       }
     });
 
     // Run initial fetch immediately (non-blocking)
     setImmediate(() => {
-      graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
+      outlookEmailService.fetchTodaysOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
         console.error('❌ [Outlook-Graph] Initial fetch error:', err.message);
       });
     });

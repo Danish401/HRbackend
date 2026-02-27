@@ -7,9 +7,11 @@ const pdfParse = require('pdf-parse');
 const Email = require('../models/Resume');
 const { extractResumeData } = require('../services/pdfParser');
 
+
 const upload = multer({ storage: multer.memoryStorage() });
 
-router.post('/upload', upload.array('resumes', 25), async (req, res) => {
+router.post('/upload', upload.array('resumes', 1000), async (req, res) => {
+
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'At least one PDF file required' });

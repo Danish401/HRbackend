@@ -16,8 +16,8 @@ const io = socketIo(server, {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // For form data
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // For form data
 
 // Helper function to properly encode MongoDB connection string password
 function encodeMongoPassword(uri) {
@@ -149,6 +149,7 @@ mongoose.connection.on('connecting', () => {
 
 // Import routes and services
 const emailRoutes = require('./routes/emailRoutes');
+const dailyOutlookRoutes = require('./routes/dailyOutlookRoutes');
 const { router: authRoutes, ensureDefaultAdmin } = require('./routes/authRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const emailService = require('./services/emailService');
@@ -161,6 +162,9 @@ app.use('/api/auth', authRoutes);
 
 // Public Outlook OAuth routes
 app.use('/api/outlook-auth', emailRoutes);
+
+// Daily Outlook email routes
+app.use('/api/daily-outlook', dailyOutlookRoutes);
 
 // Protected routes (authentication required)
 const resumeUploadRoutes = require('./routes/resumeUploadRoutes');
@@ -224,9 +228,12 @@ initRedisWithTimeout();
 
 // Health check
 app.get('/api/health', (req, res) => {
+  const hasOutlookConfig = !!(process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID);
+  
   res.json({ 
     status: 'Server is running', 
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    outlookConfigured: hasOutlookConfig,
     timestamp: new Date(),
     uptime: process.uptime(),
     memory: process.memoryUsage(),
