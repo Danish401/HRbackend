@@ -329,13 +329,13 @@ async function fetchTodaysOutlookMessages(userId, io) {
     // We'll get recent messages and filter by date on our end for precision
     let messages;
     try {
-      // First, get messages from the last 24 hours to narrow down the search
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
+      // Get messages from the last 6 hours to focus on recent activity for real-time processing
+      const sixHoursAgo = new Date();
+      sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
       
       messages = await client.api(`/me/mailFolders/inbox/messages`)
-        .filter(`receivedDateTime ge ${yesterday.toISOString()}`)
-        .top(50) // Get more messages since we'll filter by exact date
+        .filter(`receivedDateTime ge ${sixHoursAgo.toISOString()}`)
+        .top(30) // Limit to 30 recent messages for faster processing
         .select('id,subject,from,receivedDateTime,hasAttachments,bodyPreview')
         .orderby('receivedDateTime DESC')
         .get();
@@ -357,12 +357,12 @@ async function fetchTodaysOutlookMessages(userId, io) {
           client = getGraphClient(accessToken);
           
           // Retry the API call
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
+          const sixHoursAgo = new Date();
+          sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
           
           messages = await client.api(`/me/mailFolders/inbox/messages`)
-            .filter(`receivedDateTime ge ${yesterday.toISOString()}`)
-            .top(50)
+            .filter(`receivedDateTime ge ${sixHoursAgo.toISOString()}`)
+            .top(30)
             .select('id,subject,from,receivedDateTime,hasAttachments,bodyPreview')
             .orderby('receivedDateTime DESC')
             .get();
@@ -393,7 +393,7 @@ async function fetchTodaysOutlookMessages(userId, io) {
       return receivedDate >= today && receivedDate < endOfToday;
     });
 
-    console.log(`✅ [Outlook-Graph-Today] Found ${todaysMessages.length} messages from today.`);
+    console.log(`✅ [Outlook-Graph-Today] Found ${todaysMessages.length} messages from today out of ${messages.value.length} recent messages.`);
 
     let processedCount = 0;
     let skippedCount = 0;
@@ -426,26 +426,26 @@ async function fetchTodaysOutlookMessages(userId, io) {
  * Schedule daily fetch of today's emails
  */
 function scheduleDailyEmailFetch(userId, io) {
-  console.log('📅 Setting up daily Outlook email fetch...');
+  console.log('📅 Setting up real-time Outlook email fetch...');
 
   // Execute once immediately
   fetchTodaysOutlookMessages(userId, io).catch(err => {
     console.error('❌ Initial daily fetch error:', err.message);
   });
 
-  // Set up interval to check every hour during business hours
+  // Set up interval to check every 2 minutes for real-time processing
   const interval = setInterval(async () => {
     try {
       const now = new Date();
       // Only run between 6 AM and 11 PM
       if (now.getHours() >= 6 && now.getHours() < 23) {
-        console.log(`⏰ [${now.toLocaleTimeString()}] Running scheduled daily Outlook email fetch...`);
+        console.log(`⏰ [${now.toLocaleTimeString()}] Running real-time Outlook email fetch...`);
         await fetchTodaysOutlookMessages(userId, io);
       }
     } catch (err) {
-      console.error('❌ Scheduled daily fetch error:', err.message);
+      console.error('❌ Real-time fetch error:', err.message);
     }
-  }, 60 * 60 * 1000); // Every hour
+  }, 2 * 60 * 1000); // Every 2 minutes for immediate processing
 
   // Additionally, run at the start of each day
   const checkMidnight = setInterval(async () => {

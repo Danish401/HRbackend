@@ -99,4 +99,38 @@ router.get('/status', async (req, res) => {
   }
 });
 
+// Manual trigger for real-time fetch
+router.post('/trigger-realtime-fetch', async (req, res) => {
+  try {
+    const userId = process.env.MS_GRAPH_USER_ID;
+    if (!userId) {
+      return res.status(400).json({ error: 'MS_GRAPH_USER_ID not configured' });
+    }
+
+    // Check token status first
+    const tokenStatus = await checkTokenStatus(userId);
+    if (tokenStatus.status !== 'valid') {
+      return res.status(401).json({ 
+        error: 'Authentication required', 
+        tokenStatus: tokenStatus 
+      });
+    }
+
+    // Fetch today's emails
+    const io = req.app.get('io');
+    const result = await outlookEmailService.fetchTodaysOutlookMessages(userId, io);
+    
+    res.json({
+      success: true,
+      message: 'Real-time Outlook email fetch completed',
+      userId: userId,
+      result: result,
+      triggeredAt: new Date()
+    });
+  } catch (error) {
+    console.error('Error triggering real-time Outlook fetch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;

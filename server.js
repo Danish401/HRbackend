@@ -325,3 +325,30 @@ server.listen(PORT, () => {
     process.exit(1);
   }
 });
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n shutting down gracefully...');
+  try {
+    if (emailService && typeof emailService.stopMonitoring === 'function') {
+      await emailService.stopMonitoring();
+    }
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n shutting down gracefully...');
+  try {
+    if (emailService && typeof emailService.stopMonitoring === 'function') {
+      await emailService.stopMonitoring();
+    }
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+});
