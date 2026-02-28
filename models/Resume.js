@@ -46,11 +46,11 @@ const emailSchema = new mongoose.Schema({
       github: String,
       portfolio: String
     },
-    pdfPath: String,              // URL (Local, Cloudinary or S3)
+    pdfPath: String,              // URL (Local or S3)
     s3Url: String,                // AWS S3 URL for the PDF
     s3Key: String,                // AWS S3 Key for deletion
-    cloudinaryUrl: String,         // Cloudinary URL for the PDF
-    cloudinaryPublicId: String,   // Cloudinary public ID for deletion
+    // cloudinaryUrl: String,         // Cloudinary URL for the PDF - commented out as per production requirements
+    // cloudinaryPublicId: String,   // Cloudinary public ID for deletion - commented out as per production requirements
     rawText: String
   }
 }, {
@@ -74,11 +74,11 @@ const resumeSchema = new mongoose.Schema({
     github: String,
     portfolio: String
   },
-  pdfPath: String,           // URL (Cloudinary or S3)
+  pdfPath: String,           // URL (Local or S3)
   s3Url: String,             // AWS S3 URL
   s3Key: String,             // AWS S3 Key
-  cloudinaryId: String,      // For delete (kept for backward compatibility)
-  cloudinaryPublicId: String, // Cloudinary public ID
+  // cloudinaryId: String,      // For delete (kept for backward compatibility) - commented out as per production requirements
+  // cloudinaryPublicId: String, // Cloudinary public ID - commented out as per production requirements
   rawText: String,
   extractedAt: {
     type: Date,

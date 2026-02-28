@@ -1,4 +1,4 @@
-const twilio = require('twilio');
+// const twilio = require('twilio'); // Twilio commented out as per production requirements
 const Email = require('../models/Resume'); // Default export is Email model
 const { Resume } = require('../models/Resume'); // Named export is Resume model
 const cron = require('node-cron');
@@ -9,17 +9,20 @@ const isProduction = process.env.NODE_ENV === 'production';
 // Auto-restart configuration
 const AUTO_RESTART_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
-// Twilio configuration
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
-// Recipient configuration - can be overridden by environment variable
-const recipientNumber = process.env.SMS_RECIPIENT_NUMBER || '+917009236647';
+// Twilio configuration - commented out as per production requirements
+// const accountSid = process.env.TWILIO_ACCOUNT_SID;
+// const authToken = process.env.TWILIO_AUTH_TOKEN;
+// const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
+// // Recipient configuration - can be overridden by environment variable
+// const recipientNumber = process.env.SMS_RECIPIENT_NUMBER || '+917009236647';
 
-let client;
-if (accountSid && authToken) {
-  client = twilio(accountSid, authToken);
-}
+// let client;
+// if (accountSid && authToken) {
+//   client = twilio(accountSid, authToken);
+// }
+
+// Placeholder for client to avoid breaking the code
+const client = null;
 
 /**
  * Check for birthdays today and send an SMS summary
@@ -127,30 +130,13 @@ async function checkAndSendBirthdaySMS() {
 `;
     });
 
-    // Send via Twilio
-    if (!client) {
-      const errorMsg = '❌ Twilio client not initialized. Check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env';
-      if (isProduction) {
-        console.error(errorMsg);
-        // In production, you might want to send an alert to admin
-        // sendAdminAlert('SMS Service Error', errorMsg);
-      } else {
-        console.error(errorMsg);
-      }
-      return;
-    }
-
-    const response = await client.messages.create({
-      body: message,
-      from: twilioPhoneNumber,
-      to: recipientNumber
-    });
-
-    const successMsg = `✅ Birthday SMS sent! SID: ${response.sid}`;
+    // Log the birthday message to console instead of sending via Twilio
+    console.log('🎂 Birthday message prepared (Twilio disabled in production):');
+    console.log(message);
+    
+    const successMsg = `✅ Birthday notification logged to console (Twilio disabled)`;
     if (isProduction) {
       console.log(successMsg);
-      // Log to file or external service in production
-      // logToExternalService('SMS_SENT', { sid: response.sid, recipient: recipientNumber });
     } else {
       console.log(successMsg);
     }
