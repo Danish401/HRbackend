@@ -17,7 +17,7 @@ const Token = require('../models/Token');
 const msalConfig = {
   auth: {
     clientId: process.env.MS_GRAPH_CLIENT_ID,
-    authority: `https://login.microsoftonline.com/common`, // Use 'common' for personal + work accounts
+    authority: `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`, // Use 'common' to support both work and personal accounts
     clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
   }
 };
@@ -25,18 +25,42 @@ const msalConfig = {
 const cca = new msal.ConfidentialClientApplication(msalConfig);
 
 /**
+ * Determine the correct authority URL based on account type
+ * NOTE: Using 'common' endpoint to support both work/personal accounts with existing app registration
+ */
+function getAuthorityForAccount(accountEmail) {
+  // Using 'common' endpoint which should work for both work and personal accounts
+  // with existing app registrations that aren't specifically configured for 'consumers'
+  return `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+}
+
+/**
  * Get the Authorization URL for the user to visit
  */
-function getAuthUrl() {
+async function getAuthUrl(accountEmail = null) {
   const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
   
+  // Use common authority to work with existing app registration
+  // (consumers endpoint requires special app registration that supports personal accounts)
+  const authority = `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+  
+  // Create a new MSAL client with the correct authority
+  const msalConfigForAuth = {
+    auth: {
+      clientId: process.env.MS_GRAPH_CLIENT_ID,
+      authority: authority,
+      clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+    }
+  };
+  const ccaForAuth = new msal.ConfidentialClientApplication(msalConfigForAuth);
+  
   const authCodeUrlParameters = {
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
     redirectUri: redirectUri,
   };
 
-  return cca.getAuthCodeUrl(authCodeUrlParameters);
+  return ccaForAuth.getAuthCodeUrl(authCodeUrlParameters);
 }
 
 /**
@@ -48,7 +72,7 @@ async function redeemCode(code) {
   
   const tokenRequest = {
     code: code,
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
     redirectUri: redirectUri,
   };
 
@@ -92,13 +116,24 @@ async function getValidToken(accountEmail) {
 
   console.log(`🔄 Refreshing token for ${accountEmail}...`);
 
+  // Create a new MSAL client with the correct authority for personal accounts
+  const authority = getAuthorityForAccount(accountEmail);
+  const msalConfigForRefresh = {
+    auth: {
+      clientId: process.env.MS_GRAPH_CLIENT_ID,
+      authority: authority,
+      clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+    }
+  };
+  const ccaForRefresh = new msal.ConfidentialClientApplication(msalConfigForRefresh);
+
   const refreshTokenRequest = {
     refreshToken: tokenRecord.refreshToken,
-    scopes: ['offline_access', 'User.Read', 'Mail.Read'],
+    scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
   };
 
   try {
-    const response = await cca.acquireTokenByRefreshToken(refreshTokenRequest);
+    const response = await ccaForRefresh.acquireTokenByRefreshToken(refreshTokenRequest);
     
     tokenRecord.accessToken = response.accessToken;
     if (response.refreshToken) tokenRecord.refreshToken = response.refreshToken;
@@ -148,7 +183,11 @@ async function fetchOutlookMessages(userId, io) {
     const client = getGraphClient(accessToken);
 
     // Fetch last 10 messages from Inbox
-    const messages = await client.api(`/users/${userId}/mailFolders/inbox/messages`)
+    // For personal accounts, use /me instead of /users/{userId}
+    const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+    const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+    
+    const messages = await client.api(`${mailboxEndpoint}/mailFolders/inbox/messages`)
       .top(10)
       .select('id,subject,from,receivedDateTime,hasAttachments')
       .orderby('receivedDateTime DESC')
@@ -217,7 +256,11 @@ async function processGraphMessage(client, userId, message, io) {
 
   try {
     // Get message content
-    const fullMsg = await client.api(`/users/${userId}/messages/${message.id}`)
+    // For personal accounts, use /me instead of /users/{userId}
+    const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+    const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+    
+    const fullMsg = await client.api(`${mailboxEndpoint}/messages/${message.id}`)
       .select('body,hasAttachments,from,subject,receivedDateTime')
       .get();
 
@@ -232,7 +275,11 @@ async function processGraphMessage(client, userId, message, io) {
 
     // Fetch attachments if any
     if (fullMsg.hasAttachments) {
-      const attachments = await client.api(`/users/${userId}/messages/${message.id}/attachments`).get();
+      // For personal accounts, use /me instead of /users/{userId}
+      const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+      const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+      
+      const attachments = await client.api(`${mailboxEndpoint}/messages/${message.id}/attachments`).get();
       
       for (const attachment of attachments.value) {
         if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment' && 

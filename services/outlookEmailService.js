@@ -11,12 +11,22 @@ const Token = require('../models/Token');
 const msalConfig = {
   auth: {
     clientId: process.env.MS_GRAPH_CLIENT_ID,
-    authority: `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'consumers'}`,
+    authority: `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`, // Use 'common' to support both work and personal accounts
     clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
   }
 };
 
 const cca = new msal.ConfidentialClientApplication(msalConfig);
+
+/**
+ * Determine the correct authority URL based on account type
+ * NOTE: Using 'common' endpoint to support both work/personal accounts with existing app registration
+ */
+function getAuthorityForAccount(accountEmail) {
+  // Using 'common' endpoint which should work for both work and personal accounts
+  // with existing app registrations that aren't specifically configured for 'consumers'
+  return `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+}
 
 /**
  * Get a valid Access Token (refreshes if needed)
@@ -51,6 +61,17 @@ async function getValidToken(accountEmail) {
     process.env.MS_GRAPH_SCOPES.split(',').map(scope => scope.trim()) : 
     ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'];
 
+  // Create a new MSAL client with the correct authority for personal accounts
+  const authority = getAuthorityForAccount(accountEmail);
+  const msalConfigForRefresh = {
+    auth: {
+      clientId: process.env.MS_GRAPH_CLIENT_ID,
+      authority: authority,
+      clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+    }
+  };
+  const ccaForRefresh = new msal.ConfidentialClientApplication(msalConfigForRefresh);
+
   const refreshTokenRequest = {
     refreshToken: tokenRecord.refreshToken,
     scopes: scopes,
@@ -58,7 +79,7 @@ async function getValidToken(accountEmail) {
   };
 
   try {
-    const response = await cca.acquireTokenByRefreshToken(refreshTokenRequest);
+    const response = await ccaForRefresh.acquireTokenByRefreshToken(refreshTokenRequest);
 
     // Validate response
     if (!response || !response.accessToken) {
@@ -191,7 +212,11 @@ async function processGraphMessage(client, userId, message, io) {
 
   try {
     // Get message content
-    const fullMsg = await client.api(`/me/messages/${message.id}`)
+    // For personal accounts, determine correct endpoint
+    const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+    const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+    
+    const fullMsg = await client.api(`${mailboxEndpoint}/messages/${message.id}`)
       .select('body,hasAttachments,from,subject,receivedDateTime')
       .get();
 
@@ -218,7 +243,11 @@ async function processGraphMessage(client, userId, message, io) {
 
     // Fetch attachments if any
     if (fullMsg.hasAttachments) {
-      const attachments = await client.api(`/me/messages/${message.id}/attachments`)
+      // For personal accounts, determine correct endpoint
+      const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+      const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+      
+      const attachments = await client.api(`${mailboxEndpoint}/messages/${message.id}/attachments`)
         .select('id,name,contentBytes,contentType,@odata.type,size')
         .get();
 
@@ -333,7 +362,11 @@ async function fetchTodaysOutlookMessages(userId, io) {
       const sixHoursAgo = new Date();
       sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
       
-      messages = await client.api(`/me/mailFolders/inbox/messages`)
+      // For personal accounts, use /me instead of /users/{userId}
+      const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+      const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
+      
+      messages = await client.api(`${mailboxEndpoint}/mailFolders/inbox/messages`)
         .filter(`receivedDateTime ge ${sixHoursAgo.toISOString()}`)
         .top(30) // Limit to 30 recent messages for faster processing
         .select('id,subject,from,receivedDateTime,hasAttachments,bodyPreview')
@@ -360,7 +393,11 @@ async function fetchTodaysOutlookMessages(userId, io) {
           const sixHoursAgo = new Date();
           sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
           
-          messages = await client.api(`/me/mailFolders/inbox/messages`)
+          // For personal accounts, use /me instead of /users/{userId}
+          const isPersonalAccountRetry = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
+          const mailboxEndpointRetry = isPersonalAccountRetry ? '/me' : `/users/${userId}`;
+          
+          messages = await client.api(`${mailboxEndpointRetry}/mailFolders/inbox/messages`)
             .filter(`receivedDateTime ge ${sixHoursAgo.toISOString()}`)
             .top(30)
             .select('id,subject,from,receivedDateTime,hasAttachments,bodyPreview')
