@@ -151,6 +151,7 @@ mongoose.connection.on('connecting', () => {
 const emailRoutes = require('./routes/emailRoutes');
 const { router: authRoutes, ensureDefaultAdmin } = require('./routes/authRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const dailyOutlookRoutes = require('./routes/dailyOutlookRoutes');
 const emailService = require('./services/emailService');
 const smsService = require('./services/smsService');
 const { authenticate } = require('./middleware/auth');
@@ -170,6 +171,7 @@ app.use('/api/resumes', authenticate, resumeUploadRoutes);
 app.use('/api/resumes', authenticate, emailRoutes);
 app.use('/api/emails', authenticate, emailRoutes);
 app.use('/api/notifications', authenticate, notificationRoutes);
+app.use('/api/outlook', authenticate, dailyOutlookRoutes);
 
 // Debug: Log route registration
 console.log('📋 Registered routes:');

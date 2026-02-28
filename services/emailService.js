@@ -20,6 +20,7 @@ const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
 const redisService = require('./redisService');
 const tnef = require('node-tnef');
+// Note: We still keep the graphService import for any other uses, but will primarily use outlookEmailService
 const graphService = require('./graphService');
 
 // Create uploads directory if it doesn't exist
@@ -677,7 +678,9 @@ async function startMonitoring(io) {
     
     const pollInterval = setInterval(async () => {
       try {
-        await graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io);
+        // Use the enhanced outlookEmailService instead of basic graphService
+        const outlookEmailService = require('./outlookEmailService');
+        await outlookEmailService.fetchTodaysOutlookMessages(process.env.MS_GRAPH_USER_ID, io);
       } catch (err) {
         console.error('❌ [Outlook-Graph] Polling error:', err.message);
       }
@@ -692,7 +695,9 @@ async function startMonitoring(io) {
 
     // Run initial fetch immediately (non-blocking)
     setImmediate(() => {
-      graphService.fetchOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
+      // Use the enhanced outlookEmailService instead of basic graphService
+      const outlookEmailService = require('./outlookEmailService');
+      outlookEmailService.fetchTodaysOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
         console.error('❌ [Outlook-Graph] Initial fetch error:', err.message);
       });
     });

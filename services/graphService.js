@@ -157,6 +157,59 @@ function getGraphClient(accessToken) {
 }
 
 /**
+ * Check the status of the token for a given account
+ */
+async function checkTokenStatus(accountEmail) {
+  try {
+    const tokenRecord = await Token.findOne({ accountEmail: accountEmail.toLowerCase() });
+    
+    if (!tokenRecord) {
+      return {
+        status: 'missing',
+        message: 'No token found for this account. Please authorize again.',
+        accountEmail: accountEmail
+      };
+    }
+    
+    // Check if token exists and has required fields
+    if (!tokenRecord.accessToken || !tokenRecord.refreshToken || !tokenRecord.expiresAt) {
+      return {
+        status: 'invalid',
+        message: 'Token data is incomplete. Please re-authorize.',
+        accountEmail: accountEmail,
+        hasAccessToken: !!tokenRecord.accessToken,
+        hasRefreshToken: !!tokenRecord.refreshToken,
+        hasExpiresAt: !!tokenRecord.expiresAt
+      };
+    }
+    
+    // Check if token is expired
+    const isExpired = tokenRecord.expiresAt <= new Date();
+    
+    // Check if token is expiring soon (within 5 minutes)
+    const isExpiringSoon = tokenRecord.expiresAt <= new Date(Date.now() + 5 * 60 * 1000);
+    
+    return {
+      status: isExpired ? 'expired' : (isExpiringSoon ? 'expiring_soon' : 'valid'),
+      message: isExpired ? 'Token has expired and needs to be refreshed' : 
+               (isExpiringSoon ? 'Token is expiring soon' : 'Token is valid'),
+      accountEmail: accountEmail,
+      expiresAt: tokenRecord.expiresAt,
+      expiresIn: Math.floor((tokenRecord.expiresAt - Date.now()) / 1000),
+      isExpired: isExpired,
+      isExpiringSoon: isExpiringSoon
+    };
+  } catch (error) {
+    console.error('❌ Error checking token status:', error.message);
+    return {
+      status: 'error',
+      message: `Error checking token status: ${error.message}`,
+      accountEmail: accountEmail
+    };
+  }
+}
+
+/**
  * Fetch messages from Outlook via Microsoft Graph API
  */
 async function fetchOutlookMessages(userId, io) {
@@ -180,18 +233,56 @@ async function fetchOutlookMessages(userId, io) {
       return;
     }
 
-    const client = getGraphClient(accessToken);
+    let client = getGraphClient(accessToken);
 
     // Fetch last 10 messages from Inbox
     // For personal accounts, use /me instead of /users/{userId}
     const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
     const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
     
-    const messages = await client.api(`${mailboxEndpoint}/mailFolders/inbox/messages`)
-      .top(10)
-      .select('id,subject,from,receivedDateTime,hasAttachments')
-      .orderby('receivedDateTime DESC')
-      .get();
+    let messages;
+    try {
+      messages = await client.api(`${mailboxEndpoint}/mailFolders/inbox/messages`)
+        .top(10)
+        .select('id,subject,from,receivedDateTime,hasAttachments')
+        .orderby('receivedDateTime DESC')
+        .get();
+    } catch (apiError) {
+      // If it's a 401 error, the token might have expired or been revoked
+      if (apiError.statusCode === 401) {
+        console.log('🔄 401 Unauthorized received, attempting to refresh token and retry...');
+        
+        try {
+          // Force refresh by deleting the stored token temporarily and getting a new one
+          await Token.deleteOne({ accountEmail: userId.toLowerCase() });
+          
+          // Re-acquire token
+          accessToken = await getValidToken(userId);
+          
+          // Create new client with fresh token
+          client = getGraphClient(accessToken);
+          
+          // Retry the API call
+          messages = await client.api(`${mailboxEndpoint}/mailFolders/inbox/messages`)
+            .top(10)
+            .select('id,subject,from,receivedDateTime,hasAttachments')
+            .orderby('receivedDateTime DESC')
+            .get();
+            
+          console.log('✅ Successfully retried fetching messages after token refresh');
+        } catch (retryError) {
+          console.error('❌ Retry failed after token refresh:', retryError.message);
+          
+          // Check token status for more details
+          const tokenStatus = await checkTokenStatus(userId);
+          console.log(`📋 Current token status:`, JSON.stringify(tokenStatus, null, 2));
+          
+          throw retryError;
+        }
+      } else {
+        throw apiError;
+      }
+    }
 
     if (!messages.value || messages.value.length === 0) {
       console.log('❌ No messages found in Outlook inbox.');
@@ -224,6 +315,10 @@ async function fetchOutlookMessages(userId, io) {
       console.error('   1. Personal accounts (@outlook.com) often do not support "Application Permissions".');
       console.error('   2. Ensure you have granted "Admin Consent" for Mail.Read in Azure Portal.');
       console.error('   3. Check if your Client Secret is correct and not expired.');
+      
+      // Additional info for debugging
+      console.error('   4. The token might be invalid or expired. Try re-authorizing your account.');
+      console.error('   5. Make sure the account has proper permissions in Azure AD App Registration.');
     }
   }
 }
@@ -348,5 +443,6 @@ async function processGraphMessage(client, userId, message, io) {
 module.exports = {
   fetchOutlookMessages,
   getAuthUrl,
-  redeemCode
+  redeemCode,
+  checkTokenStatus
 };
