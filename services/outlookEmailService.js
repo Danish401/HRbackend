@@ -23,9 +23,9 @@ const cca = new msal.ConfidentialClientApplication(msalConfig);
  * NOTE: Using 'common' endpoint to support both work/personal accounts with existing app registration
  */
 function getAuthorityForAccount(accountEmail) {
-  // Using 'common' endpoint which should work for both work and personal accounts
-  // with existing app registrations that aren't specifically configured for 'consumers'
-  return `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+  // For personal Outlook (@outlook.com, etc.), MUST use 'common' - specific tenant blocks sign-in
+  const isPersonalAccount = accountEmail && /@(outlook|hotmail|live)\.com$/i.test(accountEmail);
+  return `https://login.microsoftonline.com/${isPersonalAccount ? 'common' : (process.env.MS_GRAPH_TENANT_ID || 'common')}`;
 }
 
 /**
@@ -35,14 +35,40 @@ async function getValidToken(accountEmail) {
   const tokenRecord = await Token.findOne({ accountEmail: accountEmail.toLowerCase() });
 
   if (!tokenRecord) {
-    throw new Error(`No token found for ${accountEmail}. Please authorize again.`);
+    // Check if token exists under different email (common typo: 700 vs 7700)
+    const anyToken = await Token.findOne({});
+    const hint = anyToken 
+      ? ` Found token for ${anyToken.accountEmail}. Set MS_GRAPH_USER_ID=${anyToken.accountEmail} in .env to match.`
+      : ' Visit /api/outlook-auth/login to authorize. Run: node scripts/list-outlook-tokens.js to diagnose.';
+    throw new Error(`No token found for ${accountEmail}. Please authorize again.${hint}`);
   }
 
-  // Check if token exists and has required fields
-  if (!tokenRecord.accessToken || !tokenRecord.refreshToken || !tokenRecord.expiresAt) {
-    console.error(`❌ Invalid token record for ${accountEmail}. Missing required fields.`);
+  // Check if token has at least an access token
+  if (!tokenRecord.accessToken) {
+    console.error(`❌ Token record for ${accountEmail} has no access token.`);
     await Token.deleteOne({ accountEmail: accountEmail.toLowerCase() });
     throw new Error(`Invalid token data for ${accountEmail}. Please re-authorize.`);
+  }
+
+  // If refreshToken or expiresAt are missing, fall back to access-token-only mode
+  if (!tokenRecord.refreshToken || !tokenRecord.expiresAt) {
+    console.warn(
+      `⚠️ Token for ${accountEmail} is missing refreshToken or expiresAt. ` +
+      'Using access token only; you may need to re-authorize later.'
+    );
+
+    // If expiresAt is missing, assume ~50 minutes lifetime from now
+    if (!tokenRecord.expiresAt) {
+      tokenRecord.expiresAt = new Date(Date.now() + 50 * 60 * 1000);
+      tokenRecord.updatedAt = new Date();
+      try {
+        await tokenRecord.save();
+      } catch (e) {
+        console.warn('⚠️ Failed to persist synthetic expiresAt for token:', e.message);
+      }
+    }
+
+    return tokenRecord.accessToken;
   }
 
   // If token is still valid (with 5 min buffer)
@@ -247,9 +273,12 @@ async function processGraphMessage(client, userId, message, io) {
       const isPersonalAccount = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
       const mailboxEndpoint = isPersonalAccount ? '/me' : `/users/${userId}`;
       
-      const attachments = await client.api(`${mailboxEndpoint}/messages/${message.id}/attachments`)
-        .select('id,name,contentBytes,contentType,@odata.type,size')
-        .get();
+      // Do NOT use $select=contentBytes on the attachments collection.
+      // The collection is typed as microsoft.graph.attachment (base type),
+      // and selecting a derived-type property (contentBytes) causes:
+      // "Could not find a property named 'contentBytes' on type 'microsoft.graph.attachment'."
+      // Let Graph return the full attachment objects instead.
+      const attachments = await client.api(`${mailboxEndpoint}/messages/${message.id}/attachments`).get();
 
       for (const attachment of attachments.value) {
         if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment' && 

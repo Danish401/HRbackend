@@ -53,7 +53,9 @@ const getIO = (req) => {
 // Outlook OAuth2 Routes
 router.get('/login', async (req, res) => {
   try {
-    const url = await graphService.getAuthUrl();
+    // Pass MS_GRAPH_USER_ID so OAuth pre-fills the correct email
+    const loginHint = process.env.MS_GRAPH_USER_ID || null;
+    const url = await graphService.getAuthUrl(loginHint);
     res.redirect(url);
   } catch (error) {
     res.status(500).json({ error: error.message });

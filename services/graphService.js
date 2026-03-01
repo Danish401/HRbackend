@@ -29,9 +29,9 @@ const cca = new msal.ConfidentialClientApplication(msalConfig);
  * NOTE: Using 'common' endpoint to support both work/personal accounts with existing app registration
  */
 function getAuthorityForAccount(accountEmail) {
-  // Using 'common' endpoint which should work for both work and personal accounts
-  // with existing app registrations that aren't specifically configured for 'consumers'
-  return `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+  // For personal Outlook (@outlook.com, etc.), MUST use 'common' - specific tenant blocks sign-in
+  const isPersonalAccount = accountEmail && /@(outlook|hotmail|live)\.com$/i.test(accountEmail);
+  return `https://login.microsoftonline.com/${isPersonalAccount ? 'common' : (process.env.MS_GRAPH_TENANT_ID || 'common')}`;
 }
 
 /**
@@ -41,9 +41,10 @@ async function getAuthUrl(accountEmail = null) {
   const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
   
-  // Use common authority to work with existing app registration
-  // (consumers endpoint requires special app registration that supports personal accounts)
-  const authority = `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+  // For personal Outlook (@outlook.com, @hotmail.com, @live.com), MUST use 'common'
+  // A specific tenant ID blocks personal accounts from signing in
+  const isPersonalAccount = accountEmail && /@(outlook|hotmail|live)\.com$/i.test(accountEmail);
+  const authority = `https://login.microsoftonline.com/${isPersonalAccount ? 'common' : (process.env.MS_GRAPH_TENANT_ID || 'common')}`;
   
   // Create a new MSAL client with the correct authority
   const msalConfigForAuth = {
@@ -58,6 +59,8 @@ async function getAuthUrl(accountEmail = null) {
   const authCodeUrlParameters = {
     scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
     redirectUri: redirectUri,
+    // Pre-fill the email so user signs in with the account matching MS_GRAPH_USER_ID
+    ...(accountEmail && { loginHint: accountEmail }),
   };
 
   return ccaForAuth.getAuthCodeUrl(authCodeUrlParameters);
@@ -65,11 +68,25 @@ async function getAuthUrl(accountEmail = null) {
 
 /**
  * Exchange Authorization Code for Tokens
+ * MUST use /common for personal accounts - AADSTS70000121 if wrong authority used
  */
 async function redeemCode(code) {
   const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
-  
+
+  // Personal accounts REQUIRE /common - AADSTS70000121 otherwise. Default to common to support @outlook.com etc.
+  const isPersonalAccount = process.env.MS_GRAPH_USER_ID && /@(outlook|hotmail|live)\.com$/i.test(process.env.MS_GRAPH_USER_ID);
+  const authority = (isPersonalAccount || !process.env.MS_GRAPH_USER_ID)
+    ? 'https://login.microsoftonline.com/common'
+    : `https://login.microsoftonline.com/${process.env.MS_GRAPH_TENANT_ID || 'common'}`;
+  const ccaForRedeem = new msal.ConfidentialClientApplication({
+    auth: {
+      clientId: process.env.MS_GRAPH_CLIENT_ID,
+      authority,
+      clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
+    }
+  });
+
   const tokenRequest = {
     code: code,
     scopes: ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'],
@@ -77,18 +94,38 @@ async function redeemCode(code) {
   };
 
   try {
-    const response = await cca.acquireTokenByCode(tokenRequest);
+    const response = await ccaForRedeem.acquireTokenByCode(tokenRequest);
+
+    if (!response || !response.account || !response.accessToken) {
+      throw new Error('Invalid token response from Microsoft Graph');
+    }
+
     const accountEmail = response.account.username.toLowerCase();
-    
+
+    console.log(
+      '✅ Outlook OAuth token acquired for',
+      accountEmail,
+      'refreshToken:',
+      !!response.refreshToken,
+      'expiresOn:',
+      response.expiresOn
+    );
+
+    // Build token data, with sensible fallbacks for missing fields
+    const tokenUpdate = {
+      accessToken: response.accessToken,
+      expiresAt: response.expiresOn || new Date(Date.now() + 50 * 60 * 1000),
+      updatedAt: new Date()
+    };
+
+    if (response.refreshToken) {
+      tokenUpdate.refreshToken = response.refreshToken;
+    }
+
     // Save or update token in DB
     await Token.findOneAndUpdate(
       { accountEmail },
-      {
-        accessToken: response.accessToken,
-        refreshToken: response.refreshToken,
-        expiresAt: response.expiresOn,
-        updatedAt: new Date()
-      },
+      tokenUpdate,
       { upsert: true }
     );
 

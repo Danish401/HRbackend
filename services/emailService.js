@@ -648,9 +648,8 @@ async function startMonitoring(io) {
     });
   }
 
-  // Outlook/Microsoft Account - Skip IMAP if Graph API is configured
-  if (process.env.OUTLOOK_USER && process.env.OUTLOOK_PASSWORD && 
-      !(process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID)) {
+  // Outlook/Microsoft Account
+  if (process.env.OUTLOOK_USER && process.env.OUTLOOK_PASSWORD) {
     configs.push({
       name: 'Outlook',
       config: createImapConfig(
@@ -814,17 +813,10 @@ async function startAccountMonitoring(account, io) {
     if (error.message.includes('LOGIN failed') || error.message.includes('authenticate') || error.message.includes('Invalid credentials')) {
       console.error(`\n💡 [${name}] Authentication failed. Please check:`);
       if (name === 'Outlook') {
-        // Skip Outlook IMAP error suggestions if Graph API is configured
-        if (!(process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID)) {
-          console.error('   1. Ensure IMAP is enabled in Outlook settings (Settings > Mail > Sync email)');
-          console.error('   2. If Two-Factor Authentication is ON, you MUST use an "App Password", not your regular password.');
-          console.error('   3. Go to Microsoft Account Security > Advanced security options to create an App Password.');
-          console.error('   4. If this is a personal account, try changing OUTLOOK_HOST to imap-mail.outlook.com');
-        } else {
-          console.error('   1. For Outlook accounts with Graph API enabled, authentication is handled via OAuth.');
-          console.error('   2. Check that your Graph API credentials are correct in .env file.');
-          console.error('   3. Visit /api/outlook-auth/login to re-authorize your Outlook account.');
-        }
+        console.error('   1. Ensure IMAP is enabled in Outlook settings (Settings > Mail > Sync email)');
+        console.error('   2. If Two-Factor Authentication is ON, you MUST use an "App Password", not your regular password.');
+        console.error('   3. Go to Microsoft Account Security > Advanced security options to create an App Password.');
+        console.error('   4. If this is a personal account, try changing OUTLOOK_HOST to imap-mail.outlook.com');
       } else {
         console.error(`   - Check ${name === 'Primary' ? 'IMAP_USER and IMAP_PASSWORD' : 'credentials'} in .env`);
         console.error('   - For Gmail: Use an App Password (not your regular password).');

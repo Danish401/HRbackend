@@ -26,12 +26,22 @@ function extractResumeData(text) {
     return data;
   }
 
-  console.log(`📄 PDF text length: ${text.length} characters`);
-  console.log(`📄 First 500 chars: ${text.substring(0, 500)}`);
+  console.log(`📄 PDF raw text length: ${text.length} characters`);
+  console.log(`📄 First 500 raw chars: ${text.substring(0, 500)}`);
 
-  // Keep original text with newlines for better pattern matching
-  const originalText = text;
-  const lines = originalText.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+  // ========== NORMALIZE TEXT FOR CONSISTENT LAYOUT HANDLING ==========
+  // We keep newlines (layout signal) but normalize bullets, spaces and encodings.
+  const originalText = text
+    .replace(/\r\n/g, '\n')                 // normalize newlines
+    .replace(/\u00A0/g, ' ')                // non‑breaking space -> normal space
+    .replace(/[•●∙▪◦]/g, '•')               // normalize bullet symbols
+    .replace(/[ \t]+/g, ' ')                // collapse multiple spaces
+    .replace(/[ \t]*\n[ \t]*/g, '\n');      // trim each line's ends
+
+  const lines = originalText
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
   
   console.log(`📄 Total lines: ${lines.length}`);
   console.log(`📄 First 10 lines:`, lines.slice(0, 10));
@@ -61,7 +71,11 @@ function extractResumeData(text) {
   if (!data.name && lines.length > 0) {
     const firstLine = lines[0];
     // Check if first line is all uppercase letters (could be "DANISHALI" or "DANISH ALI")
-    if (firstLine === firstLine.toUpperCase() && /^[A-Z]+$/.test(firstLine.replace(/\s/g, ''))) {
+    if (
+      firstLine === firstLine.toUpperCase() &&
+      /^[A-Z]+$/.test(firstLine.replace(/\s/g, '')) &&
+      !/RESUME|CURRICULUM|VITAE|CV/.test(firstLine) // avoid picking "RESUME" etc. as name
+    ) {
       // If it's a single word, try to split it intelligently (e.g., "DANISHALI" -> "DANISH ALI")
       if (firstLine.length > 5 && firstLine.length < 30) {
         // Try to detect if it's two names combined (common pattern)
@@ -84,7 +98,13 @@ function extractResumeData(text) {
     for (let i = 0; i < Math.min(5, lines.length); i++) {
       const line = lines[i];
       // Check if line is all uppercase and 2-4 words
-      if (line === line.toUpperCase() && line.length > 5 && line.length < 50) {
+      if (
+        line === line.toUpperCase() &&
+        line.length > 5 &&
+        line.length < 50 &&
+        !/RESUME|CURRICULUM|VITAE|CV/.test(line) &&           // avoid titles
+        !/ENGINEER|DEVELOPER|MANAGER|ANALYST|DESIGNER/.test(line) // avoid role lines
+      ) {
         const words = line.split(/\s+/);
         if (words.length >= 2 && words.length <= 4 && /^[A-Z\s]+$/.test(line)) {
           data.name = line;
@@ -99,6 +119,7 @@ function extractResumeData(text) {
   if (!data.name) {
     for (let i = 0; i < Math.min(10, lines.length); i++) {
       const line = lines[i];
+      if (/resume|curriculum|vitae|cv/i.test(line)) continue; // skip obvious non-name titles
       const words = line.split(/\s+/);
       
       // Check if line has 2-4 words and all start with capital letters
@@ -117,8 +138,9 @@ function extractResumeData(text) {
 
   // Strategy 4: Look for common name patterns (First Last format)
   if (!data.name) {
+    const headerPortion = originalText.split('\n').slice(0, 20).join('\n');
     const namePattern = /^([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/m;
-    const match = originalText.match(namePattern);
+    const match = headerPortion.match(namePattern);
     if (match && match[1]) {
       data.name = match[1].trim();
       console.log(`✓ Name found (pattern 4): "${data.name}"`);
@@ -262,18 +284,37 @@ function extractResumeData(text) {
   }
 
   if (!data.contactNumber) {
+    // Final fallback: infer from header/contact-style lines (for very compact headers)
+    const headerLines = lines.slice(0, Math.min(10, lines.length));
+    const headerPhoneLike = /\+?\d[\d\s().-]{7,}/;
+    for (const line of headerLines) {
+      if (!headerPhoneLike.test(line)) continue;
+      const matches = line.match(/[+\d\s().-]+/g) || [];
+      for (const candidate of matches) {
+        const cleaned = candidate.replace(/[^\d+]/g, '');
+        if (cleaned.length >= 10 && cleaned.length <= 15) {
+          data.contactNumber = cleaned;
+          console.log(`✓ Contact inferred from header line: "${data.contactNumber}" (from: "${line}")`);
+          break;
+        }
+      }
+      if (data.contactNumber) break;
+    }
+  }
+
+  if (!data.contactNumber) {
     console.log('❌ Contact number not found');
-    console.log('  Attempted patterns: labeled patterns, international formats, US formats, generic patterns');
+    console.log('  Attempted patterns: labeled patterns, international formats, US formats, generic patterns, header inference');
   }
 
   // ========== EXTRACT DATE OF BIRTH ==========
   console.log('🔍 Extracting date of birth...');
   const dobPatterns = [
     // Support prefixes like zDOB or —DOB or #DOB and various dash types
-    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi,
-    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4})/gi,
+    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.](?:19[4-9]\d|200[0-9]|201[0-5]))/gi,
+    /(?:date\s*of\s*birth|dob|d\.o\.b\.|birth\s*date|born|birth)\s*[:\-=—–]?\s*([A-Za-z]+\s+\d{1,2},?\s+(?:19[4-9]\d|200[0-9]|201[0-5]))/gi,
     // Catch cases where DOB is preceded by artifacts like "zDOB"
-    /[a-z]?(?:dob|birth|born)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/gi
+    /[a-z]?(?:dob|birth|born)\s*[:\-=—–]?\s*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.](?:19[4-9]\d|200[0-9]|201[0-5]))/gi
   ];
   
   for (const pattern of dobPatterns) {
@@ -290,10 +331,22 @@ function extractResumeData(text) {
   // If DOB not found, look for any date that looks like a birth date (between 1940-2015)
   if (!data.dateOfBirth) {
     const datePattern = /\b(0?[1-9]|[12][0-9]|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](19[4-9]\d|200[0-9]|201[0-5])\b/g;
-    const dateMatches = originalText.match(datePattern);
-    if (dateMatches && dateMatches.length > 0) {
-      data.dateOfBirth = dateMatches[0].trim();
+    let dateMatch;
+    while ((dateMatch = datePattern.exec(originalText)) !== null) {
+      const full = dateMatch[0];
+      // Avoid dates that clearly look like employment ranges ("to", "-", "present") on same line
+      const lineStart = originalText.lastIndexOf('\n', datePattern.lastIndex - full.length) + 1;
+      const lineEnd = originalText.indexOf('\n', datePattern.lastIndex);
+      const line = originalText.substring(
+        lineStart === -1 ? 0 : lineStart,
+        lineEnd === -1 ? originalText.length : lineEnd
+      );
+      if (/to\s+\d{2}|-\s*\d{2}|present|current/i.test(line)) {
+        continue;
+      }
+      data.dateOfBirth = full.trim();
       console.log(`✓ DOB found (fallback): "${data.dateOfBirth}"`);
+      break;
     }
   }
 
@@ -416,9 +469,11 @@ function extractResumeData(text) {
   for (const pattern of locationPatterns) {
     const match = originalText.match(pattern);
     if (match && match[1]) {
-      const loc = match[1].trim();
+      let loc = match[1].trim();
       // Filter out common false positives
       if (loc.length > 3 && loc.length < 100 && !loc.toLowerCase().includes('engineer') && !loc.toLowerCase().includes('developer')) {
+        // Clean up brackets or array-like artifacts
+        loc = loc.replace(/[\[\]]/g, '').replace(/Array\s*/i, '').trim();
         data.location = loc;
         console.log(`✓ Location found: "${data.location}"`);
         break;
@@ -426,57 +481,206 @@ function extractResumeData(text) {
     }
   }
 
+  // Fallback: infer location from header/contact lines (common "City, Country | Phone | Email" layout)
+  if (!data.location) {
+    const headerLines = lines.slice(0, Math.min(10, lines.length));
+    const contactHints = [];
+
+    // Collect candidate header lines that contain email or phone-like patterns
+    const simplePhoneLike = /\d{6,}/;
+    const emailLike = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
+    for (const line of headerLines) {
+      if (emailLike.test(line) || simplePhoneLike.test(line)) {
+        contactHints.push(line);
+      }
+    }
+
+    const candidateLines = contactHints.length > 0 ? contactHints : headerLines;
+
+    for (const line of candidateLines) {
+      // Split header segments on common separators
+      const segments = line.split(/[|•·]/).map(s => s.trim()).filter(Boolean);
+      for (const seg of segments) {
+        const segLower = seg.toLowerCase();
+        // Skip obvious non-location segments
+        if (seg.includes('@')) continue;
+        if (/\d{4,}/.test(seg)) continue; // likely phone/pincode
+        if (segLower.includes('engineer') || segLower.includes('developer') || segLower.includes('resume')) continue;
+
+        // Heuristic: 1-4 words, starting uppercase, maybe containing a comma
+        const words = seg.split(/\s+/).filter(Boolean);
+        const allWordsCapitalized = words.every(w => /^[A-Z][a-zA-Z.-]*$/.test(w));
+        if (seg.includes(',') || (words.length >= 1 && words.length <= 4 && allWordsCapitalized)) {
+          data.location = seg;
+          console.log(`✓ Location inferred from header line: "${data.location}" (from: "${line}")`);
+          break;
+        }
+      }
+      if (data.location) break;
+    }
+  }
+
   // ========== EXTRACT LINKS ==========
   console.log('🔍 Extracting links...');
-  // Improved patterns for full URLs and profiles
-  const linkedinPatterns = [
-    /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9_-]+/gi,
-    /(?:linkedin|lin)\s*[:\-=]?\s*([^\s\n\r,]+)/i
-  ];
-  const githubPatterns = [
-    /(?:https?:\/\/)?(?:www\.)?github\.com\/[A-Za-z0-9_-]+/gi,
-    /(?:github|git)\s*[:\-=]?\s*([^\s\n\r,]+)/i
-  ];
-  const portfolioPattern = /(?:portfolio|website|personal\s*site|web)\s*[:\-=]?\s*(https?:\/\/[^\s\n\r,]+)/gi;
 
-  for (const pattern of linkedinPatterns) {
-    pattern.lastIndex = 0;
-    const match = pattern.exec(originalText);
-    if (match) {
-      let link = (match[1] || match[0]).replace(/(?:linkedin|lin)\s*[:\-=]?\s*/i, '').trim();
-      if (link.includes('linkedin.com')) {
-        if (!link.startsWith('http')) link = 'https://' + link;
-      } else if (link.length > 3 && !link.includes('@') && !link.includes('.') ) {
-        link = 'https://www.linkedin.com/in/' + link;
+  // Helper to normalize raw URL-like strings
+  const normalizeUrl = raw => {
+    if (!raw) return '';
+    let url = String(raw).trim();
+    url = url.replace(/^[<([]+|[>)]*$/g, '');     // strip wrapping brackets
+    url = url.replace(/[),.;]+$/g, '');           // strip trailing punctuation
+    if (!url) return '';
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url.replace(/^www\./i, 'www.');
+    }
+    return url;
+  };
+
+  // 1) Collect ALL URL-like tokens once
+  const allUrls = [];
+  const urlRegex = /(?:https?:\/\/|www\.)[^\s)]+/gi;
+  let urlMatch;
+  while ((urlMatch = urlRegex.exec(originalText)) !== null) {
+    const normalized = normalizeUrl(urlMatch[0]);
+    if (!normalized) continue;
+    allUrls.push({ url: normalized, index: urlMatch.index });
+  }
+
+  // Sort by position in text (top of resume first)
+  allUrls.sort((a, b) => a.index - b.index);
+
+  // 2) Classify URLs into LinkedIn / GitHub / Others
+  const otherUrls = [];
+  for (const { url } of allUrls) {
+    if (/linkedin\.com/i.test(url)) {
+      if (!data.links.linkedin) {
+        data.links.linkedin = url;
+        console.log(`✓ LinkedIn found (URL scan): "${data.links.linkedin}"`);
+      }
+    } else if (/github\.com/i.test(url)) {
+      if (!data.links.github) {
+        data.links.github = url;
+        console.log(`✓ GitHub found (URL scan): "${data.links.github}"`);
+      }
+    } else {
+      otherUrls.push(url);
+    }
+  }
+
+  // 3) Label-based LinkedIn / GitHub (handles "LinkedIn: username" or "GitHub: user")
+  if (!data.links.linkedin) {
+    const linkedinLabelPattern = /(?:linkedin|lin)\s*[:\-=]?\s*([^\s\n\r,]+)/gi;
+    let m;
+    while ((m = linkedinLabelPattern.exec(originalText)) !== null) {
+      let value = (m[1] || '').trim().replace(/[),.;]+$/g, '');
+      if (!value) continue;
+      if (value.includes('linkedin.com')) {
+        data.links.linkedin = normalizeUrl(value);
+      } else if (!value.includes('@')) {
+        data.links.linkedin = normalizeUrl(`www.linkedin.com/in/${value}`);
       } else {
         continue;
       }
-      data.links.linkedin = link;
-      console.log(`✓ LinkedIn found: "${data.links.linkedin}"`);
+      console.log(`✓ LinkedIn found (label-based): "${data.links.linkedin}"`);
       break;
     }
   }
 
-  for (const pattern of githubPatterns) {
-    pattern.lastIndex = 0;
-    const match = pattern.exec(originalText);
-    if (match) {
-      let link = (match[1] || match[0]).replace(/(?:github|git)\s*[:\-=]?\s*/i, '').trim();
-      if (link.includes('github.com')) {
-        if (!link.startsWith('http')) link = 'https://' + link;
-      } else if (link.length > 3 && !link.includes('@') && !link.includes('.') ) {
-        link = 'https://github.com/' + link;
+  if (!data.links.github) {
+    const githubLabelPattern = /(?:github|git)\s*[:\-=]?\s*([^\s\n\r,]+)/gi;
+    let m;
+    while ((m = githubLabelPattern.exec(originalText)) !== null) {
+      let value = (m[1] || '').trim().replace(/[),.;]+$/g, '');
+      if (!value) continue;
+      if (value.includes('github.com')) {
+        data.links.github = normalizeUrl(value);
+      } else if (!value.includes('@')) {
+        data.links.github = normalizeUrl(`github.com/${value}`);
       } else {
         continue;
       }
-      data.links.github = link;
-      console.log(`✓ GitHub found: "${data.links.github}"`);
+      console.log(`✓ GitHub found (label-based): "${data.links.github}"`);
       break;
     }
   }
 
-  const portfolioMatch = originalText.match(portfolioPattern);
-  if (portfolioMatch) data.links.portfolio = portfolioMatch[1] || portfolioMatch[0];
+  // 4) Portfolio / personal website from explicit label
+  const portfolioLabelPattern = /(?:portfolio|website|personal\s*site|web)\s*[:\-=]?\s*([^\s\n\r,]+)/gi;
+  let portfolioMatch;
+  while ((portfolioMatch = portfolioLabelPattern.exec(originalText)) !== null) {
+    const raw = (portfolioMatch[1] || '').trim();
+    const normalized = normalizeUrl(raw);
+    if (normalized) {
+      data.links.portfolio = normalized;
+      console.log(`✓ Portfolio found (label-based): "${data.links.portfolio}"`);
+      break;
+    }
+  }
+
+  // 5) Fallback portfolio: first non-LinkedIn / non-GitHub URL (usually personal site)
+  if (!data.links.portfolio && otherUrls.length > 0) {
+    data.links.portfolio = otherUrls[0];
+    console.log(`✓ Portfolio inferred from remaining URLs: "${data.links.portfolio}"`);
+  }
+
+  // ========== EXTRACT SKILLS ==========
+  console.log('🔍 Extracting skills...');
+  const skillsSectionPatterns = [
+    /(?:skills|technical\s*skills|key\s*skills|skills\s*&\s*abilities)\s*[:\-=]?\s*([\s\S]{20,1200}?(?=\n\s*(?:experience|work\s*experience|employment|education|projects|certifications|languages|summary|objective|about\s*me|personal|$)))/gi
+  ];
+
+  let skillsBlock = '';
+  for (const pattern of skillsSectionPatterns) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(originalText);
+    if (match) {
+      skillsBlock = (match[1] || '').trim();
+      break;
+    }
+  }
+
+  if (skillsBlock) {
+    // Split on newlines, commas, and bullets
+    const rawTokens = skillsBlock
+      .split(/[\n,•·\-•]/)
+      .map(t => t.trim())
+      .filter(t => t.length > 1 && t.length <= 60);
+
+    const cleaned = Array.from(new Set(
+      rawTokens.map(t => t.replace(/^[•\-–]+/, '').trim())
+    )).filter(t => {
+      const lower = t.toLowerCase();
+      // Filter out obvious non-skill phrases
+      if (lower.startsWith('experience') || lower.startsWith('education') || lower.startsWith('summary')) return false;
+      if (/\byears?\b/.test(lower)) return false;
+      return true;
+    });
+
+    if (cleaned.length > 0) {
+      data.skills = cleaned;
+      console.log(`✓ Skills found: ${data.skills.length} skills extracted`);
+    }
+  }
+
+  // ========== EXTRACT EDUCATION ==========
+  console.log('🔍 Extracting education...');
+  const educationPatterns = [
+    /(?:education|academic\s*background|qualifications|academic\s*qualifications)\s*[:\-=]?\s*([\s\S]{30,1600}?(?=\n\s*(?:experience|work\s*experience|projects|skills|technical\s*skills|certifications|summary|objective|about\s*me|personal|languages|$)))/gi
+  ];
+
+  for (const pattern of educationPatterns) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(originalText);
+    if (match) {
+      const eduText = (match[1] || '').trim();
+      if (eduText.length > 20) {
+        data.education = eduText;
+        console.log(`✓ Education found (length: ${data.education.length})`);
+        break;
+      }
+    }
+  }
 
   // ========== EXTRACT SUMMARY ==========
   console.log('🔍 Extracting summary...');
@@ -496,6 +700,74 @@ function extractResumeData(text) {
       }
     }
   }
+
+  // ========== NAME POST-PROCESSING USING EMAIL HEADER ==========
+  // If name still missing, infer it from the line(s) above the email (very common layout)
+  if (!data.name && data.email) {
+    const emailLower = data.email.toLowerCase();
+    let emailLineIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase().includes(emailLower)) {
+        emailLineIndex = i;
+        break;
+      }
+    }
+
+    if (emailLineIndex > 0) {
+      for (let offset = 1; offset <= 3; offset++) {
+        const idx = emailLineIndex - offset;
+        if (idx < 0) break;
+        const candidate = lines[idx].trim();
+        if (!candidate) continue;
+        const candLower = candidate.toLowerCase();
+        if (candidate.includes('@')) continue;
+        if (/\d{3,}/.test(candidate)) continue;
+        if (candLower.includes('resume') || candLower.includes('curriculum')) continue;
+
+        const words = candidate.split(/\s+/).filter(Boolean);
+        if (words.length >= 2 && words.length <= 4) {
+          const allWordsNameLike = words.every(w => /^[A-Z][a-zA-Z'-]*$/.test(w));
+          if (allWordsNameLike) {
+            data.name = candidate;
+            console.log(`✓ Name inferred from header above email: "${data.name}"`);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Final name fallback: derive from email local-part (e.g. "john.doe_01" -> "John Doe")
+  if (!data.name && data.email) {
+    const localPart = data.email.split('@')[0];
+    if (localPart && localPart.length > 2 && !/^\d+$/.test(localPart)) {
+      const pieces = localPart
+        .split(/[._\-]+/)
+        .filter(Boolean)
+        .slice(0, 4);
+      if (pieces.length >= 1) {
+        const candidate = pieces
+          .map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+          .join(' ');
+        if (candidate.length > 2) {
+          data.name = candidate;
+          console.log(`✓ Name inferred from email local-part: "${data.name}"`);
+        }
+      }
+    }
+  }
+
+  // ========== FINAL NORMALIZATION OF FIELDS ==========
+  if (data.name) data.name = data.name.replace(/\s+/g, ' ').replace(/[\[\]]/g, '').trim();
+  if (data.location) {
+    data.location = data.location
+      .replace(/[\[\]]/g, '')
+      .replace(/Array\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  if (data.role) data.role = data.role.replace(/\s+/g, ' ').trim();
+  if (data.dateOfBirth) data.dateOfBirth = data.dateOfBirth.trim();
 
   console.log(`\n📊 Final extracted data:`, JSON.stringify(data, null, 2));
   return data;
