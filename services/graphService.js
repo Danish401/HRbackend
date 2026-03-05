@@ -6,6 +6,7 @@ require('dotenv').config();
 const Email = require('../models/Resume');
 const redisService = require('./redisService');
 const { extractResumeData } = require('./pdfParser');
+const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 // Lazy load emailService to avoid circular dependency
 function getEmailService() {
   return require('./emailService');
@@ -436,6 +437,17 @@ async function processGraphMessage(client, userId, message, io) {
       }
     }
 
+    // Deduplication: same file (sha256) → skip save
+    let dedup = null;
+    if (hasAttachment && attachmentData) {
+      dedup = await checkDuplicateAndPrepare(attachmentData.fileSha256, attachmentData);
+      if (dedup.isDuplicate) {
+        console.log(`⏭️ [Outlook-Graph] Duplicate resume (same file hash), skipping save. Existing ID: ${dedup.existingId}`);
+        await redisService.markEmailProcessed(emailId).catch(() => {});
+        return;
+      }
+    }
+
     // Save to database
     console.log(`\n💾 [Outlook-Graph] Saving email to MongoDB...`);
 
@@ -452,6 +464,10 @@ async function processGraphMessage(client, userId, message, io) {
 
     const savedEmail = await email.save();
     console.log(`✅ [Outlook-Graph] Email saved successfully!`);
+
+    if (hasAttachment && attachmentData && dedup) {
+      await linkResumeToCandidate(savedEmail, dedup.normalizedEmail, dedup.normalizedPhone);
+    }
 
     // Mark as processed
     const emailService = getEmailService();

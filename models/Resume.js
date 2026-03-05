@@ -25,6 +25,16 @@ const emailSchema = new mongoose.Schema({
     type: String,
     unique: true  // To avoid duplicate emails
   },
+  // Pipeline / categorization
+  source: {
+    type: String,
+    default: 'email',
+    index: true
+  },
+  tags: {
+    type: [String],
+    default: []
+  },
   // PDF attachment data (if PDF is attached)
   hasAttachment: {
     type: Boolean,
@@ -38,6 +48,8 @@ const emailSchema = new mongoose.Schema({
     experience: String,
     role: String,
     location: String,
+    currentSalary: String,
+    noticePeriod: String,
     skills: [String],
     education: String,
     summary: String,
@@ -49,12 +61,23 @@ const emailSchema = new mongoose.Schema({
     pdfPath: String,              // URL (Local or S3)
     s3Url: String,                // AWS S3 URL for the PDF
     s3Key: String,                // AWS S3 Key for deletion
-    // cloudinaryUrl: String,         // Cloudinary URL for the PDF - commented out as per production requirements
-    // cloudinaryPublicId: String,   // Cloudinary public ID for deletion - commented out as per production requirements
-    rawText: String
+    rawText: String,
+    // Deduplication
+    fileSha256: String,           // SHA256 of PDF file (indexed for duplicate check)
+    isDuplicate: { type: Boolean, default: false },
+    candidateId: { type: mongoose.Schema.Types.ObjectId, ref: 'Candidate', default: null }
   }
 }, {
   timestamps: true
+});
+
+emailSchema.index({ 'attachmentData.fileSha256': 1 });
+emailSchema.index({
+  'attachmentData.name': 'text',
+  'attachmentData.location': 'text',
+  'attachmentData.skills': 'text',
+  'attachmentData.summary': 'text',
+  'attachmentData.rawText': 'text'
 });
 
 // Resume schema (for direct uploads)

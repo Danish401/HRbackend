@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const { extractResumeData } = require('../services/pdfParser');
 const graphService = require('../services/graphService');
 const Email = require('../models/Resume');
+const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('../services/deduplicationService');
 const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
 const { GetObjectCommand } = require("@aws-sdk/client-s3");
@@ -108,6 +109,89 @@ router.get('/stats/count', async (req, res) => {
   }
 });
 
+// Search with filters + Mongo text search
+router.get('/search', async (req, res) => {
+  try {
+    const {
+      q,
+      location,
+      status,
+      source,
+      skills,
+      tags,
+      minExp,
+      maxExp
+    } = req.query;
+
+    const query = { hasAttachment: true };
+
+    if (location) {
+      query['attachmentData.location'] = new RegExp(location, 'i');
+    }
+    if (status) {
+      query.status = status;
+    }
+    if (source) {
+      query.source = source;
+    }
+
+    const skillsArr = typeof skills === 'string'
+      ? skills.split(',').map(s => s.trim()).filter(Boolean)
+      : Array.isArray(skills) ? skills : [];
+    if (skillsArr.length > 0) {
+      query['attachmentData.skills'] = { $all: skillsArr };
+    }
+
+    const tagsArr = typeof tags === 'string'
+      ? tags.split(',').map(t => t.trim()).filter(Boolean)
+      : Array.isArray(tags) ? tags : [];
+    if (tagsArr.length > 0) {
+      query.tags = { $all: tagsArr };
+    }
+
+    if (q && q.trim()) {
+      query.$text = { $search: q.trim() };
+    }
+
+    let cursor = Email.find(query);
+    if (q && q.trim()) {
+      cursor = cursor
+        .select({ score: { $meta: 'textScore' } })
+        .sort({ score: { $meta: 'textScore' }, receivedAt: -1 });
+    } else {
+      cursor = cursor.sort({ receivedAt: -1, createdAt: -1 });
+    }
+
+    // Limit to avoid unbounded responses
+    let results = await cursor.limit(500).exec();
+
+    // Experience range filtering (best-effort, parsed from free-text experience field)
+    const min = minExp ? parseFloat(minExp) : null;
+    const max = maxExp ? parseFloat(maxExp) : null;
+
+    if (min !== null || max !== null) {
+      const parseYears = (expStr) => {
+        if (!expStr || typeof expStr !== 'string') return null;
+        const match = expStr.match(/([0-9]+(?:\\.[0-9]+)?)/);
+        return match ? parseFloat(match[1]) : null;
+      };
+
+      results = results.filter(doc => {
+        const years = parseYears(doc.attachmentData?.experience || '');
+        if (years === null) return false;
+        if (min !== null && years < min) return false;
+        if (max !== null && years > max) return false;
+        return true;
+      });
+    }
+
+    res.json(results);
+  } catch (error) {
+    console.error('❌ Error in /search:', error);
+    res.status(500).json({ error: error.message || 'Search failed' });
+  }
+});
+
 // Test endpoint to verify route registration
 router.get('/test-upload-route', (req, res) => {
   res.json({ message: 'Upload route is registered!', path: '/api/resumes/upload', method: 'POST' });
@@ -188,6 +272,14 @@ async function processUploadedResume(file, req) {
     role: extractedData.role
   });
 
+  // Deduplication: same file (sha256) → skip save
+  const dedup = await checkDuplicateAndPrepare(pdfBuffer, extractedData);
+  if (dedup.isDuplicate) {
+    if (s3Url) { try { await fs.remove(file.path); } catch (e) { /* ignore */ } }
+    console.log(`⏭️ Duplicate resume (same file hash), skipping save. Existing ID: ${dedup.existingId}`);
+    return { duplicate: true, existingId: dedup.existingId };
+  }
+
   // Check MongoDB connection before saving
   if (mongoose.connection.readyState !== 1) {
     console.error('❌ MongoDB not connected');
@@ -198,7 +290,7 @@ async function processUploadedResume(file, req) {
     throw new Error('Database connection unavailable. Please try again later.');
   }
 
-  // Create email/resume record
+  // Create email/resume record (with fileSha256 for future dedup)
   const resumeData = {
     from: extractedData.email || 'upload@youhrpower.com',
     fromName: extractedData.name || 'Resume Upload',
@@ -217,13 +309,17 @@ ${JSON.stringify(extractedData, null, 2)}`,
       s3Url: s3Url || null,
       s3Key: s3Key || null,
       pdfPath: s3Url || file.path, // Use S3 URL if available, otherwise local path
-      rawText: pdfText.substring(0, 5000) // Store first 5000 chars
+      rawText: pdfText.substring(0, 5000), // Store first 5000 chars
+      fileSha256: dedup.fileSha256 || null
     }
   };
 
   // Save to database
   const savedResume = await Email.create(resumeData);
   console.log(`✅ Resume saved to database: ${savedResume._id}`);
+
+  // Link to candidate (same email/phone → same candidate; else create new)
+  await linkResumeToCandidate(savedResume, dedup.normalizedEmail, dedup.normalizedPhone);
 
   // Clean up local file if S3 upload succeeded
   if (s3Url) {
@@ -272,7 +368,11 @@ router.post('/upload', (req, res, next) => {
     for (const file of req.files) {
       try {
         const saved = await processUploadedResume(file, req);
-        results.push({ file: file.originalname, status: 'success', resume: saved });
+        if (saved && saved.duplicate === true) {
+          results.push({ file: file.originalname, status: 'duplicate', existingId: saved.existingId });
+        } else {
+          results.push({ file: file.originalname, status: 'success', resume: saved });
+        }
       } catch (e) {
         console.error(`❌ Error processing ${file.originalname}:`, e.message);
         results.push({ file: file.originalname, status: 'error', error: e.message });
@@ -833,6 +933,12 @@ router.post('/add-from-url', async (req, res) => {
     console.log('🔍 Extracting resume data...');
     const extractedData = extractResumeData(pdfText);
 
+    // Deduplication: same file (sha256) → skip save
+    const dedup = await checkDuplicateAndPrepare(pdfBuffer, extractedData);
+    if (dedup.isDuplicate) {
+      return res.status(400).json({ error: 'Duplicate resume (same file already exists)', existingId: dedup.existingId });
+    }
+
     // Create email/resume record - generate a new timestamp for the record
     const emailTimestamp = Date.now();
     const resumeData = {
@@ -845,10 +951,9 @@ router.post('/add-from-url', async (req, res) => {
       hasAttachment: true,
       attachmentData: {
         ...extractedData,
-        // cloudinaryUrl: cloudinaryUrl || null,         // Cloudinary URL - commented out as per production requirements
-        // cloudinaryPublicId: cloudinaryPublicId || null, // Cloudinary public ID - commented out as per production requirements
-        pdfPath: path.join(__dirname, '../uploads', `${timestamp}_resume_from_url.pdf`), // Local file path since Cloudinary is removed
-        rawText: pdfText.substring(0, 5000) // Store first 5000 chars
+        pdfPath: path.join(__dirname, '../uploads', `${timestamp}_resume_from_url.pdf`),
+        rawText: pdfText.substring(0, 5000),
+        fileSha256: dedup.fileSha256 || null
       }
     };
 
@@ -861,6 +966,9 @@ router.post('/add-from-url', async (req, res) => {
     // Save to database
     const savedResume = await Email.create(resumeData);
     console.log(`✅ Resume saved to database: ${savedResume._id}`);
+
+    // Link to candidate (same email/phone → same candidate; else create new)
+    await linkResumeToCandidate(savedResume, dedup.normalizedEmail, dedup.normalizedPhone);
 
     // Emit socket event for real-time update
     const io = req.app.get('io');

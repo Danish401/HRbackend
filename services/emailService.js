@@ -16,6 +16,7 @@ try {
 
 const Email = require('../models/Resume');
 const { extractResumeData } = require('./pdfParser');
+const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
 const redisService = require('./redisService');
@@ -443,6 +444,17 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
       }
     }
 
+    // Deduplication: same file (sha256) → skip save
+    let dedup = null;
+    if (hasAttachment && attachmentData) {
+      dedup = await checkDuplicateAndPrepare(attachmentData.fileSha256, attachmentData);
+      if (dedup.isDuplicate) {
+        console.log(`⏭️ [${accountName}] Duplicate resume (same file hash), skipping save. Existing ID: ${dedup.existingId}`);
+        await markAsProcessed(uid);
+        return;
+      }
+    }
+
     // Save to database
     console.log(`\n💾 Saving email to MongoDB...`);
 
@@ -453,6 +465,7 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
       body: emailBodyText,
       receivedAt: emailDate,
       emailId: emailId,
+      status: 'NEW',
       hasAttachment: hasAttachment,
       attachmentData: attachmentData || undefined
     });
@@ -460,6 +473,10 @@ async function processEmailContent(emailData, uid, subject, fromEmail, fromName,
     const savedEmail = await email.save();
     console.log(`✅ Email saved successfully!`);
     console.log(`   MongoDB ID: ${savedEmail._id}`);
+
+    if (hasAttachment && attachmentData && dedup) {
+      await linkResumeToCandidate(savedEmail, dedup.normalizedEmail, dedup.normalizedPhone);
+    }
 
     if (hasAttachment && attachmentData) {
       console.log(`\n✅ PDF data extracted:`);
@@ -600,12 +617,16 @@ async function processPdfAttachment(attachment, filename, accountName = 'Primary
     console.log(`     Contact: ${extractedData.contactNumber || 'N/A'}`);
     console.log(`     DOB: ${extractedData.dateOfBirth || 'N/A'}`);
 
+    const { computeFileSha256 } = require('./deduplicationService');
+    const fileSha256 = computeFileSha256(pdfContent);
+
     return {
       ...extractedData,
       s3Url: s3Url || null,
       s3Key: s3Key || null,
       pdfPath: s3Url || localPath,
-      rawText: extractedText.substring(0, 5000)
+      rawText: extractedText.substring(0, 5000),
+      fileSha256: fileSha256 || null
     };
 
   } catch (error) {

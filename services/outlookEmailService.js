@@ -3,6 +3,7 @@ const msal = require('@azure/msal-node');
 const Email = require('../models/Resume');
 const redisService = require('./redisService');
 const { processPdfAttachment } = require('./emailService');
+const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 require('dotenv').config();
 
 const Token = require('../models/Token');
@@ -312,6 +313,17 @@ async function processGraphMessage(client, userId, message, io) {
       }
     }
 
+    // Deduplication: same file (sha256) → skip save
+    let dedup = null;
+    if (hasAttachment && attachmentData) {
+      dedup = await checkDuplicateAndPrepare(attachmentData.fileSha256, attachmentData);
+      if (dedup.isDuplicate) {
+        console.log(`⏭️ Duplicate resume (same file hash), skipping save. Existing ID: ${dedup.existingId}`);
+        await markEmailAsProcessed(emailId);
+        return true; // still "processed" so we don't retry
+      }
+    }
+
     // Save to database
     console.log(`💾 Saving email to MongoDB...`);
 
@@ -322,12 +334,17 @@ async function processGraphMessage(client, userId, message, io) {
       body: bodyText,
       receivedAt: receivedAt,
       emailId: emailId,
+      status: 'NEW',
       hasAttachment: hasAttachment,
       attachmentData: attachmentData || undefined
     });
 
     const savedEmail = await email.save();
     console.log(`✅ Email saved successfully!`);
+
+    if (hasAttachment && attachmentData && dedup) {
+      await linkResumeToCandidate(savedEmail, dedup.normalizedEmail, dedup.normalizedPhone);
+    }
 
     // Mark as processed
     await markEmailAsProcessed(emailId);

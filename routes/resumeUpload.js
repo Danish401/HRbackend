@@ -6,6 +6,7 @@ const upload = require('../middleware/upload');
 const pdfParse = require('pdf-parse');
 const Email = require('../models/Resume');
 const { extractResumeData } = require('../services/pdfParser');
+const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('../services/deduplicationService');
 
 router.post('/upload', upload.array('resumes', 25), async (req, res) => {
   try {
@@ -41,6 +42,17 @@ router.post('/upload', upload.array('resumes', 25), async (req, res) => {
         // 3️⃣ Extract structured data
         const extractedData = extractResumeData(rawText);
 
+        // 3.5️⃣ Deduplication: same file (sha256) → skip save
+        const dedup = await checkDuplicateAndPrepare(file.buffer, extractedData);
+        if (dedup.isDuplicate) {
+          results.push({
+            status: 'duplicate',
+            file: file.originalname,
+            existingId: dedup.existingId
+          });
+          continue;
+        }
+
         // 4️⃣ Save in MongoDB (using Email model structure for frontend compatibility)
         const resumeData = {
           from: extractedData.email || 'upload@user.com',
@@ -55,11 +67,14 @@ router.post('/upload', upload.array('resumes', 25), async (req, res) => {
             rawText,
             pdfPath: s3Url,
             s3Url: s3Url,
-            s3Key: s3Key
+            s3Key: s3Key,
+            fileSha256: dedup.fileSha256 || null
           }
         };
 
         const resume = await Email.create(resumeData);
+
+        await linkResumeToCandidate(resume, dedup.normalizedEmail, dedup.normalizedPhone);
 
         // 5️⃣ Emit socket event for real-time update
         const io = req.app.get('io');
