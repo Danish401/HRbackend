@@ -15,6 +15,7 @@ try {
 }
 
 const Email = require('../models/Resume');
+const Token = require('../models/Token');
 const { extractResumeData } = require('./pdfParser');
 const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 const { s3Client, bucketName } = require('../config/s3');
@@ -671,18 +672,27 @@ async function startMonitoring(io) {
   }
 
   // Also start Microsoft Graph API polling if configured (non-blocking)
-  if (process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET && process.env.MS_GRAPH_USER_ID) {
-    console.log(`\n🚀 [Outlook-Graph] Starting Microsoft Graph API polling...`);
-    
+  // Use MS_GRAPH_USER_ID from .env, or any stored Outlook token so one-time verify is enough
+  const hasGraphCreds = process.env.MS_GRAPH_CLIENT_ID && process.env.MS_GRAPH_CLIENT_SECRET;
+  let outlookUserId = process.env.MS_GRAPH_USER_ID || null;
+  if (hasGraphCreds && !outlookUserId) {
+    const storedToken = await Token.findOne({}).lean();
+    if (storedToken && storedToken.accountEmail) {
+      outlookUserId = storedToken.accountEmail;
+      console.log(`\n📧 [Outlook-Graph] Using stored account: ${outlookUserId} (set MS_GRAPH_USER_ID in .env to override)`);
+    }
+  }
+  if (hasGraphCreds && outlookUserId) {
+    console.log(`\n🚀 [Outlook-Graph] Starting Microsoft Graph API polling (every 1 min for near-instant mail)...`);
+
     const pollInterval = setInterval(async () => {
       try {
-        // Use the enhanced outlookEmailService instead of basic graphService
         const outlookEmailService = require('./outlookEmailService');
-        await outlookEmailService.fetchTodaysOutlookMessages(process.env.MS_GRAPH_USER_ID, io);
+        await outlookEmailService.fetchTodaysOutlookMessages(outlookUserId, io);
       } catch (err) {
         console.error('❌ [Outlook-Graph] Polling error:', err.message);
       }
-    }, 5 * 60 * 1000); // Poll every 5 minutes
+    }, 1 * 60 * 1000); // Poll every 1 minute so new mail appears quickly
 
     monitoringInstances.push({
       name: 'Outlook-Graph',
@@ -691,11 +701,9 @@ async function startMonitoring(io) {
       }
     });
 
-    // Run initial fetch immediately (non-blocking)
     setImmediate(() => {
-      // Use the enhanced outlookEmailService instead of basic graphService
       const outlookEmailService = require('./outlookEmailService');
-      outlookEmailService.fetchTodaysOutlookMessages(process.env.MS_GRAPH_USER_ID, io).catch(err => {
+      outlookEmailService.fetchTodaysOutlookMessages(outlookUserId, io).catch(err => {
         console.error('❌ [Outlook-Graph] Initial fetch error:', err.message);
       });
     });

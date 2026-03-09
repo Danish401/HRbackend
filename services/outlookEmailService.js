@@ -76,44 +76,53 @@ async function getValidToken(accountEmail) {
     return tokenRecord.accessToken;
   }
 
-  console.log(`🔄 Refreshing token for ${accountEmail}...`);
+  return doRefreshToken(tokenRecord, accountEmail);
+}
 
-  // Use the same redirect URI that was used for the original authorization
-  const redirectUri = process.env.MS_GRAPH_REDIRECT_URI || 
+/**
+ * Force refresh the token (used on 401 from API - don't delete token, refresh it)
+ */
+async function forceRefreshToken(accountEmail) {
+  const tokenRecord = await Token.findOne({ accountEmail: accountEmail.toLowerCase() });
+  if (!tokenRecord || !tokenRecord.refreshToken) {
+    throw new Error(`No refresh token for ${accountEmail}. Please re-authorize once at /api/outlook-auth/login`);
+  }
+  return doRefreshToken(tokenRecord, accountEmail);
+}
+
+async function doRefreshToken(tokenRecord, accountEmail) {
+  const acc = accountEmail || tokenRecord.accountEmail;
+
+  const redirectUri = process.env.MS_GRAPH_REDIRECT_URI ||
     `http://localhost:${process.env.PORT || 5000}/api/outlook-auth/callback`;
 
-  // Use configured scopes or default scopes
-  const scopes = process.env.MS_GRAPH_SCOPES ? 
-    process.env.MS_GRAPH_SCOPES.split(',').map(scope => scope.trim()) : 
+  const scopes = process.env.MS_GRAPH_SCOPES ?
+    process.env.MS_GRAPH_SCOPES.split(',').map(scope => scope.trim()) :
     ['offline_access', 'User.Read', 'Mail.Read', 'Mail.Read.Shared'];
 
-  // Create a new MSAL client with the correct authority for personal accounts
-  const authority = getAuthorityForAccount(accountEmail);
-  const msalConfigForRefresh = {
+  const authority = getAuthorityForAccount(acc);
+  const ccaForRefresh = new msal.ConfidentialClientApplication({
     auth: {
       clientId: process.env.MS_GRAPH_CLIENT_ID,
-      authority: authority,
+      authority,
       clientSecret: process.env.MS_GRAPH_CLIENT_SECRET,
     }
-  };
-  const ccaForRefresh = new msal.ConfidentialClientApplication(msalConfigForRefresh);
+  });
 
   const refreshTokenRequest = {
     refreshToken: tokenRecord.refreshToken,
-    scopes: scopes,
-    redirectUri: redirectUri,
+    scopes,
+    redirectUri,
   };
 
   try {
     const response = await ccaForRefresh.acquireTokenByRefreshToken(refreshTokenRequest);
 
-    // Validate response
     if (!response || !response.accessToken) {
       throw new Error('Invalid token response from Microsoft Graph');
     }
 
     tokenRecord.accessToken = response.accessToken;
-    // Only update refresh token if Microsoft provided a new one
     if (response.refreshToken) {
       tokenRecord.refreshToken = response.refreshToken;
     }
@@ -121,26 +130,22 @@ async function getValidToken(accountEmail) {
     tokenRecord.updatedAt = new Date();
     await tokenRecord.save();
 
-    console.log(`✅ Token refreshed successfully for ${accountEmail}`);
+    console.log(`✅ Token refreshed successfully for ${acc}`);
     return response.accessToken;
   } catch (error) {
     console.error('❌ Error refreshing Outlook token:', error.message);
 
-    // Handle various token expiration/revocation scenarios
-    const isTokenInvalid = error.errorCode === 'invalid_grant' || 
-                          error.message.includes('invalid_grant') || 
-                          error.message.includes('AADSTS70008') || // Refresh token expired
-                          error.message.includes('AADSTS50012') || // Invalid client secret
-                          error.message.includes('AADSTS70002') || // Invalid client credentials
-                          error.statusCode === 401;
+    const isTokenInvalid = error.errorCode === 'invalid_grant' ||
+      error.message.includes('invalid_grant') ||
+      error.message.includes('AADSTS70008') ||
+      error.message.includes('AADSTS50012') ||
+      error.message.includes('AADSTS70002') ||
+      error.statusCode === 401;
 
     if (isTokenInvalid) {
-      console.error(`❌ Refresh token for ${accountEmail} is invalid/expired. User needs to re-authorize.`);
-      
-      // Delete the invalid token record so user can re-authenticate
-      await Token.deleteOne({ accountEmail: accountEmail.toLowerCase() });
-      
-      throw new Error(`Authentication expired for ${accountEmail}. Please re-authorize.`);
+      console.error(`❌ Refresh token for ${acc} is invalid/expired. User needs to re-authorize once.`);
+      await Token.deleteOne({ accountEmail: (acc || tokenRecord.accountEmail).toLowerCase() });
+      throw new Error(`Authentication expired for ${acc}. Please re-authorize once at /api/outlook-auth/login`);
     }
 
     throw error;
@@ -377,8 +382,7 @@ async function fetchTodaysOutlookMessages(userId, io) {
       client = getGraphClient(accessToken);
     } catch (clientError) {
       console.error('❌ Error creating Graph client:', clientError.message);
-      await Token.deleteOne({ accountEmail: userId.toLowerCase() });
-      throw new Error('Failed to create Graph client. Please re-authorize your account.');
+      throw new Error('Failed to create Graph client.');
     }
 
     // Get today's date in ISO format for filtering
@@ -404,39 +408,29 @@ async function fetchTodaysOutlookMessages(userId, io) {
         .get();
     } catch (apiError) {
       console.error('❌ Error fetching messages from Graph API:', apiError.message);
-      
-      // If it's a 401 error, the token might have expired or been revoked
+
+      // On 401: refresh token and retry (do NOT delete token – that forced re-verification)
       if (apiError.statusCode === 401) {
-        console.log('🔄 Attempting to refresh token and retry...');
-        
+        console.log('🔄 401 received – refreshing token and retrying (no re-login required)...');
         try {
-          // Force refresh by deleting the stored token temporarily
-          await Token.deleteOne({ accountEmail: userId.toLowerCase() });
-          
-          // Re-acquire token
-          accessToken = await getValidToken(userId);
-          
-          // Create new client with fresh token
+          accessToken = await forceRefreshToken(userId);
           client = getGraphClient(accessToken);
-          
-          // Retry the API call
+
           const sixHoursAgo = new Date();
           sixHoursAgo.setHours(sixHoursAgo.getHours() - 6);
-          
-          // For personal accounts, use /me instead of /users/{userId}
           const isPersonalAccountRetry = userId.endsWith('@outlook.com') || userId.endsWith('@hotmail.com') || userId.endsWith('@live.com');
           const mailboxEndpointRetry = isPersonalAccountRetry ? '/me' : `/users/${userId}`;
-          
+
           messages = await client.api(`${mailboxEndpointRetry}/mailFolders/inbox/messages`)
             .filter(`receivedDateTime ge ${sixHoursAgo.toISOString()}`)
             .top(30)
             .select('id,subject,from,receivedDateTime,hasAttachments,bodyPreview')
             .orderby('receivedDateTime DESC')
             .get();
-            
-          console.log('✅ Successfully retried fetching messages after token refresh');
+
+          console.log('✅ Retry after token refresh succeeded');
         } catch (retryError) {
-          console.error('❌ Retry failed:', retryError.message);
+          console.error('❌ Retry after 401 failed:', retryError.message);
           throw retryError;
         }
       } else {

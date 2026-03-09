@@ -117,62 +117,38 @@ async function redeemCode(code) {
     
     const response = await ccaForRedeem.acquireTokenByCode(tokenRequest);
 
-    console.log('\n🔍 === MICROSOFT OAuth Response Debug ===');
-    console.log('Full response object keys:', Object.keys(response || {}));
-    console.log('Response account:', response?.account);
-    console.log('Response has accessToken:', !!response?.accessToken);
-    console.log('Response has refreshToken:', !!response?.refreshToken);
-    console.log('Response has idToken:', !!response?.idToken);
-    console.log('Response fromCache:', response?.fromCache || false);
-    console.log('Response expiresOn:', response?.expiresOn);
-    console.log('Response extendsExpiry:', response?.extendsExpiry);
-    console.log('Response refreshOn:', response?.refreshOn || 'Not set');
-    console.log('Response extExpiresOn:', response?.extExpiresOn || 'Not set');
-    
-    // Check if response is from cache - this might mean old/different token
-    if (response?.fromCache) {
-      console.log('\n⚠️  WARNING: Token response is from CACHE!');
-      console.log('   This might be from a previous authorization attempt.');
-      console.log('   Cached responses may not include refresh tokens.');
-      console.log('   Try clearing browser cache/cookies and re-authorizing in incognito mode.');
-    }
-    
-    // Log refresh token if it exists
-    if (response?.refreshToken) {
-      console.log('\n✅ REFRESH TOKEN FOUND!');
-      console.log('Refresh token length:', response.refreshToken.length);
-      console.log('Refresh token preview:', response.refreshToken.substring(0, 50) + '...');
-      console.log('Refresh token starts with:', response.refreshToken.substring(0, 20));
-      console.log('\n🎉 This will enable automatic token refresh for 90 days!');
-    } else {
-      console.log('\n❌ REFRESH TOKEN NOT RETURNED BY MICROSOFT');
-      console.log('This is WHY it\'s not being stored in MongoDB!');
-      console.log('\n📋 CRITICAL CHECKLIST:');
-      console.log('   1. Did you see ALL consent screens during login?');
-      console.log('   2. Did you click "Yes, I trust this app" or similar?');
-      console.log('   3. Was "offline_access" permission shown and granted?');
-      console.log('   4. Are you using a personal @outlook.com account?');
-      console.log('   5. Try again in incognito/private browsing mode\n');
-      console.log('💡 SOLUTION: Delete token and re-authorize:');
-      console.log('   node scripts/fix-missing-refresh-token.js');
-      console.log('   Then visit: http://localhost:5000/api/outlook-auth/login\n');
-    }
-    console.log('=== End Debug ===\n');
-
     if (!response || !response.account || !response.accessToken) {
       throw new Error('Invalid token response from Microsoft Graph');
     }
 
     const accountEmail = response.account.username.toLowerCase();
 
-    console.log(
-      '✅ Outlook OAuth token acquired for',
-      accountEmail,
-      'refreshToken:',
-      !!response.refreshToken,
-      'expiresOn:',
-      response.expiresOn
-    );
+    // MSAL Node does NOT return refreshToken in the response – it stores it in the token cache.
+    // Extract it from the cache so we can persist it and avoid manual re-authorization.
+    let refreshTokenToSave = response.refreshToken || null;
+    if (!refreshTokenToSave) {
+      try {
+        const tokenCache = ccaForRedeem.getTokenCache();
+        const serialized = tokenCache.serialize();
+        if (serialized) {
+          const cache = JSON.parse(serialized);
+          const refreshEntries = cache?.RefreshToken || {};
+          const entries = Object.values(refreshEntries).filter(e => e && typeof e.secret === 'string');
+          if (entries.length > 0) {
+            const matching = entries.find(e =>
+              e.home_account_id === response.account.homeAccountId && e.environment === response.account.environment
+            );
+            const chosen = matching || entries[0];
+            refreshTokenToSave = chosen.secret;
+            console.log('✅ Refresh token read from MSAL cache (not in response) – will persist for auto-refresh.');
+          }
+        }
+      } catch (cacheErr) {
+        console.warn('⚠️ Could not read refresh token from MSAL cache:', cacheErr.message);
+      }
+    } else {
+      console.log('✅ Refresh token in response – will persist for auto-refresh.');
+    }
 
     // Build token data, with sensible fallbacks for missing fields
     const tokenUpdate = {
@@ -181,12 +157,11 @@ async function redeemCode(code) {
       updatedAt: new Date()
     };
 
-    if (response.refreshToken) {
-      tokenUpdate.refreshToken = response.refreshToken;
-      console.log('💾 Saving refresh token to MongoDB...');
+    if (refreshTokenToSave) {
+      tokenUpdate.refreshToken = refreshTokenToSave;
+      console.log('💾 Saving refresh token to MongoDB – no need to re-authorize when token expires.');
     } else {
-      console.warn('⚠️  NOT saving refresh token (Microsoft did not provide one)');
-      console.warn('   Without refresh token, auto-refresh will NOT work after 1 hour!');
+      console.warn('⚠️ No refresh token available. Re-authorization may be needed after ~1 hour.');
     }
 
     // Save or update token in DB
