@@ -19,7 +19,6 @@ const { extractResumeData } = require('./pdfParser');
 const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 const { s3Client, bucketName } = require('../config/s3');
 const { Upload } = require("@aws-sdk/lib-storage");
-const redisService = require('./redisService');
 const tnef = require('node-tnef');
 // Note: We still keep the graphService import for any other uses, but will primarily use outlookEmailService
 const graphService = require('./graphService');
@@ -56,13 +55,8 @@ const createImapConfig = (user, password, host, port) => {
 
 let monitoringInstances = [];
 
-// Store processed email UIDs (in-memory fallback)
+// Store processed email UIDs (in-memory only since Redis removed)
 const processedEmails = new Set();
-
-// Initialize Redis on module load
-redisService.initializeRedis().catch(err => {
-  console.warn('⚠️ Redis initialization failed, will use in-memory fallback:', err.message);
-});
 
 /**
  * Main function to process emails for a specific connection
@@ -270,21 +264,10 @@ function filterEmailsByDate(messages, today) {
 async function processIndividualEmail(message, connection, io, accountName = 'Primary') {
   const uid = message.attributes.uid;
 
-  // Check if already processed
+  // Check if already processed (using in-memory set only)
   if (processedEmails.has(uid)) {
     console.log(`⏭️  [${accountName}] Email UID ${uid} already processed (in-memory), skipping...`);
     return;
-  }
-
-  try {
-    const isProcessed = await redisService.isEmailProcessed(uid);
-    if (isProcessed) {
-      console.log(`⏭️  [${accountName}] Email UID ${uid} already processed (Redis), skipping...`);
-      processedEmails.add(uid);
-      return;
-    }
-  } catch (error) {
-    console.log(`⚠️  [${accountName}] Redis check failed for UID ${uid}, continuing...`);
   }
 
   try {
@@ -639,13 +622,7 @@ async function processPdfAttachment(attachment, filename, accountName = 'Primary
  * Mark email as processed
  */
 async function markAsProcessed(uid) {
-  try {
-    await redisService.markEmailProcessed(uid);
-    processedEmails.add(uid);
-  } catch (error) {
-    console.warn(`⚠️ Could not mark UID ${uid} in Redis: ${error.message}`);
-    processedEmails.add(uid); // At least mark in memory
-  }
+  processedEmails.add(uid);
 }
 
 /**

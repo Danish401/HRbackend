@@ -4,7 +4,6 @@ require('isomorphic-fetch');
 require('dotenv').config();
 
 const Email = require('../models/Resume');
-const redisService = require('./redisService');
 const { extractResumeData } = require('./pdfParser');
 const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 // Lazy load emailService to avoid circular dependency
@@ -62,9 +61,24 @@ async function getAuthUrl(accountEmail = null) {
     redirectUri: redirectUri,
     // Pre-fill the email so user signs in with the account matching MS_GRAPH_USER_ID
     ...(accountEmail && { loginHint: accountEmail }),
+    // Force prompt to ensure user sees consent screen and gets refresh token
+    prompt: 'consent',  // Forces consent screen - CRITICAL for refresh token!
   };
 
-  return ccaForAuth.getAuthCodeUrl(authCodeUrlParameters);
+  console.log('\n🔐 Generating OAuth Authorization URL...');
+  console.log('   Authority:', authority);
+  console.log('   Scopes requested:', authCodeUrlParameters.scopes.join(', '));
+  console.log('   Redirect URI:', redirectUri);
+  console.log('   Account email:', accountEmail || 'Not specified (user will choose)');
+  console.log('   Is personal account:', isPersonalAccount ? 'Yes' : 'No/Unknown');
+  console.log('   ⚠️  CRITICAL: "offline_access" scope IS included - required for refresh token!\n');
+
+  const authUrl = await ccaForAuth.getAuthCodeUrl(authCodeUrlParameters);
+  
+  console.log('✅ Auth URL generated (length:', authUrl.length, 'chars)');
+  console.log('   URL preview:', authUrl.substring(0, 150) + '...\n');
+  
+  return authUrl;
 }
 
 /**
@@ -95,7 +109,55 @@ async function redeemCode(code) {
   };
 
   try {
+    console.log('\n💡 Requesting token from Microsoft with authorization code...');
+    console.log('   Authority URL:', authority);
+    console.log('   Scopes:', tokenRequest.scopes.join(', '));
+    console.log('   Code length:', tokenRequest.code?.length || 0);
+    console.log('   Redirect URI:', redirectUri);
+    
     const response = await ccaForRedeem.acquireTokenByCode(tokenRequest);
+
+    console.log('\n🔍 === MICROSOFT OAuth Response Debug ===');
+    console.log('Full response object keys:', Object.keys(response || {}));
+    console.log('Response account:', response?.account);
+    console.log('Response has accessToken:', !!response?.accessToken);
+    console.log('Response has refreshToken:', !!response?.refreshToken);
+    console.log('Response has idToken:', !!response?.idToken);
+    console.log('Response fromCache:', response?.fromCache || false);
+    console.log('Response expiresOn:', response?.expiresOn);
+    console.log('Response extendsExpiry:', response?.extendsExpiry);
+    console.log('Response refreshOn:', response?.refreshOn || 'Not set');
+    console.log('Response extExpiresOn:', response?.extExpiresOn || 'Not set');
+    
+    // Check if response is from cache - this might mean old/different token
+    if (response?.fromCache) {
+      console.log('\n⚠️  WARNING: Token response is from CACHE!');
+      console.log('   This might be from a previous authorization attempt.');
+      console.log('   Cached responses may not include refresh tokens.');
+      console.log('   Try clearing browser cache/cookies and re-authorizing in incognito mode.');
+    }
+    
+    // Log refresh token if it exists
+    if (response?.refreshToken) {
+      console.log('\n✅ REFRESH TOKEN FOUND!');
+      console.log('Refresh token length:', response.refreshToken.length);
+      console.log('Refresh token preview:', response.refreshToken.substring(0, 50) + '...');
+      console.log('Refresh token starts with:', response.refreshToken.substring(0, 20));
+      console.log('\n🎉 This will enable automatic token refresh for 90 days!');
+    } else {
+      console.log('\n❌ REFRESH TOKEN NOT RETURNED BY MICROSOFT');
+      console.log('This is WHY it\'s not being stored in MongoDB!');
+      console.log('\n📋 CRITICAL CHECKLIST:');
+      console.log('   1. Did you see ALL consent screens during login?');
+      console.log('   2. Did you click "Yes, I trust this app" or similar?');
+      console.log('   3. Was "offline_access" permission shown and granted?');
+      console.log('   4. Are you using a personal @outlook.com account?');
+      console.log('   5. Try again in incognito/private browsing mode\n');
+      console.log('💡 SOLUTION: Delete token and re-authorize:');
+      console.log('   node scripts/fix-missing-refresh-token.js');
+      console.log('   Then visit: http://localhost:5000/api/outlook-auth/login\n');
+    }
+    console.log('=== End Debug ===\n');
 
     if (!response || !response.account || !response.accessToken) {
       throw new Error('Invalid token response from Microsoft Graph');
@@ -121,14 +183,25 @@ async function redeemCode(code) {
 
     if (response.refreshToken) {
       tokenUpdate.refreshToken = response.refreshToken;
+      console.log('💾 Saving refresh token to MongoDB...');
+    } else {
+      console.warn('⚠️  NOT saving refresh token (Microsoft did not provide one)');
+      console.warn('   Without refresh token, auto-refresh will NOT work after 1 hour!');
     }
 
     // Save or update token in DB
-    await Token.findOneAndUpdate(
+    const savedToken = await Token.findOneAndUpdate(
       { accountEmail },
       tokenUpdate,
-      { upsert: true }
+      { upsert: true, new: true }
     );
+    
+    console.log('\n📦 MongoDB Token Document:');
+    console.log('   accountEmail:', savedToken.accountEmail);
+    console.log('   Has accessToken:', !!savedToken.accessToken);
+    console.log('   Has refreshToken:', !!savedToken.refreshToken);
+    console.log('   expiresAt:', savedToken.expiresAt);
+    console.log('   _id:', savedToken._id, '\n');
 
     return accountEmail;
   } catch (error) {
@@ -139,20 +212,61 @@ async function redeemCode(code) {
 
 /**
  * Get a valid Access Token (refreshes if needed)
+ * 
+ * Token Lifecycle:
+ * 1. Access Token valid for ~1 hour
+ * 2. Refresh Token valid for 90 days
+ * 3. Automatic refresh when access token expires
+ * 4. No manual re-authorization needed unless refresh token expires
  */
 async function getValidToken(accountEmail) {
   const tokenRecord = await Token.findOne({ accountEmail: accountEmail.toLowerCase() });
   
   if (!tokenRecord) {
+    console.error(`❌ No token found for ${accountEmail}. User needs to authorize.`);
     throw new Error(`No token found for ${accountEmail}. Please authorize again.`);
   }
 
-  // If token is still valid (with 5 min buffer)
-  if (tokenRecord.expiresAt > new Date(Date.now() + 5 * 60 * 1000)) {
+  // Validate required fields
+  if (!tokenRecord.accessToken) {
+    console.error(`❌ Token record for ${accountEmail} missing accessToken.`);
+    await Token.deleteOne({ accountEmail: accountEmail.toLowerCase() });
+    throw new Error(`Invalid token data for ${accountEmail}. Please re-authorize.`);
+  }
+
+  // Handle case where refreshToken is missing (fallback to access token only)
+  if (!tokenRecord.refreshToken || !tokenRecord.expiresAt) {
+    console.warn(
+      `⚠️ Token for ${accountEmail} missing refreshToken or expiresAt. ` +
+      'Using current access token; may need re-authorization soon.'
+    );
+    
+    // If expiresAt is missing, assume 50 minutes from now
+    if (!tokenRecord.expiresAt) {
+      tokenRecord.expiresAt = new Date(Date.now() + 50 * 60 * 1000);
+      tokenRecord.updatedAt = new Date();
+      await tokenRecord.save().catch(e => {
+        console.warn('⚠️ Failed to save synthetic expiresAt:', e.message);
+      });
+    }
+    
     return tokenRecord.accessToken;
   }
 
-  console.log(`🔄 Refreshing token for ${accountEmail}...`);
+  // Check if token is still valid (with 5-minute buffer before expiry)
+  const now = new Date();
+  const bufferTime = new Date(now.getTime() + 5 * 60 * 1000);
+  
+  if (tokenRecord.expiresAt > bufferTime) {
+    // Token is still valid
+    return tokenRecord.accessToken;
+  }
+
+  console.log(
+    `🔄 Access token expired for ${accountEmail}. ` +
+    `Expired at: ${tokenRecord.expiresAt.toISOString()}, Now: ${now.toISOString()}. ` +
+    'Attempting automatic refresh with refresh token...'
+  );
 
   // Create a new MSAL client with the correct authority for personal accounts
   const authority = getAuthorityForAccount(accountEmail);
@@ -173,15 +287,64 @@ async function getValidToken(accountEmail) {
   try {
     const response = await ccaForRefresh.acquireTokenByRefreshToken(refreshTokenRequest);
     
+    if (!response || !response.accessToken) {
+      throw new Error('Microsoft returned invalid token response');
+    }
+    
+    // Update tokens in database
     tokenRecord.accessToken = response.accessToken;
-    if (response.refreshToken) tokenRecord.refreshToken = response.refreshToken;
-    tokenRecord.expiresAt = response.expiresOn;
+    // Microsoft may rotate refresh tokens - always save the new one if provided
+    if (response.refreshToken) {
+      tokenRecord.refreshToken = response.refreshToken;
+      console.log(`🔄 Refresh token rotated for ${accountEmail}`);
+    }
+    tokenRecord.expiresAt = response.expiresOn || new Date(Date.now() + 50 * 60 * 1000);
     tokenRecord.updatedAt = new Date();
     await tokenRecord.save();
 
+    console.log(
+      `✅ Token refreshed successfully for ${accountEmail}. ` +
+      `New expiry: ${tokenRecord.expiresAt.toISOString()} ` +
+      `(valid for ~${Math.floor((tokenRecord.expiresAt - new Date()) / 60000)} minutes)`
+    );
     return response.accessToken;
   } catch (error) {
     console.error('❌ Error refreshing Outlook token:', error.message);
+    console.error(`   Error Code: ${error.errorCode || 'N/A'}`);
+    console.error(`   Status Code: ${error.statusCode || 'N/A'}`);
+    
+    // Check if refresh token has expired or been revoked
+    const isRefreshTokenExpired = 
+      error.errorCode === 'invalid_grant' ||
+      error.message.includes('invalid_grant') ||
+      error.message.includes('AADSTS70008') || // Refresh token expired
+      error.message.includes('AADSTS50012') || // Invalid client secret
+      error.message.includes('AADSTS70002') || // Invalid client credentials
+      error.message.includes('AADSTS50173') || // Failed authentication
+      error.statusCode === 401 ||
+      error.statusCode === 403;
+
+    if (isRefreshTokenExpired) {
+      console.error(
+        `❌ Refresh token for ${accountEmail} has expired or been revoked. ` +
+        'This happens after 90 days of inactivity or if user revoked access. ' +
+        'User MUST re-authorize.'
+      );
+      
+      // Delete invalid token so user can re-authenticate
+      await Token.deleteOne({ accountEmail: accountEmail.toLowerCase() });
+      
+      throw new Error(
+        `Authentication expired for ${accountEmail}. ` +
+        'Refresh token no longer valid. Please re-authorize your Microsoft account.'
+      );
+    }
+
+    // For other errors, keep the old token in case it's still usable
+    console.warn(
+      `⚠️ Token refresh failed but keeping existing token. ` +
+      'Will retry on next request.'
+    );
     throw error;
   }
 }
@@ -367,19 +530,9 @@ async function fetchOutlookMessages(userId, io) {
 async function processGraphMessage(client, userId, message, io) {
   const emailId = `graph_${message.id}`;
 
-  // Check if already processed
-  try {
-    const isProcessed = await redisService.isEmailProcessed(emailId);
-    if (isProcessed) {
-      return;
-    }
-  } catch (err) {
-    // Fallback to DB check if Redis fails
-  }
-
+  // Check if already processed (Redis removed, using DB only)
   const existingEmail = await Email.findOne({ emailId });
   if (existingEmail) {
-    await redisService.markEmailProcessed(emailId).catch(() => {});
     return;
   }
 
@@ -443,7 +596,7 @@ async function processGraphMessage(client, userId, message, io) {
       dedup = await checkDuplicateAndPrepare(attachmentData.fileSha256, attachmentData);
       if (dedup.isDuplicate) {
         console.log(`⏭️ [Outlook-Graph] Duplicate resume (same file hash), skipping save. Existing ID: ${dedup.existingId}`);
-        await redisService.markEmailProcessed(emailId).catch(() => {});
+        // Skip Redis marking - not used
         return;
       }
     }
@@ -469,13 +622,12 @@ async function processGraphMessage(client, userId, message, io) {
       await linkResumeToCandidate(savedEmail, dedup.normalizedEmail, dedup.normalizedPhone);
     }
 
-    // Mark as processed
+    // Mark as processed using emailService
     const emailService = getEmailService();
     if (emailService && emailService.markAsProcessed) {
       await emailService.markAsProcessed(emailId);
-    } else {
-      await redisService.markEmailProcessed(emailId).catch(() => {});
     }
+    // Note: Redis service removed - not used in current implementation
 
     // Emit real-time notification
     if (io) {

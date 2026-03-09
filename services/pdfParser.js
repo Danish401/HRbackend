@@ -49,6 +49,26 @@ function extractResumeData(text) {
   // ========== EXTRACT NAME ==========
   console.log('🔍 Extracting name...');
   
+  // Common resume section headers to IGNORE (case-insensitive)
+  const sectionHeaders = [
+    'SUMMARY', 'OBJECTIVE', 'SKILLS', 'EDUCATION', 'EXPERIENCE',
+    'WORK EXPERIENCE', 'PROFESSIONAL EXPERIENCE', 'EMPLOYMENT',
+    'PROJECTS', 'CERTIFICATIONS', 'AWARDS', 'PUBLICATIONS',
+    'REFERENCES', 'HOBBIES', 'INTERESTS', 'LANGUAGES',
+    'PERSONAL DETAILS', 'CONTACT', 'PROFILE', 'ABOUT',
+    'TECHNICAL SKILLS', 'KEY SKILLS', 'CORE COMPETENCIES',
+    'ACHIEVEMENTS', 'QUALIFICATIONS', 'TRAINING', 'COURSES'
+  ];
+  
+  // Helper function to check if a line is a section header
+  const isSectionHeader = (line) => {
+    const normalized = line.trim().toUpperCase().replace(/[^A-Z]/g, '');
+    return sectionHeaders.some(header => 
+      normalized === header.replace(/[^A-Z]/g, '') ||
+      normalized.includes(header.replace(/[^A-Z]/g, ''))
+    );
+  };
+  
   // Strategy 1: Look for "Name:" or "Full Name:" patterns (case insensitive)
   const namePatterns1 = [
     /(?:^|\n)\s*name\s*[:]\s*([^\n\r]+)/i,
@@ -67,27 +87,37 @@ function extractResumeData(text) {
   }
 
   // Strategy 2: Look for all-caps name at the start (common in resumes)
-  // First check if first line is all caps (could be name even if single word)
+  // But SKIP section headers and common non-name text
   if (!data.name && lines.length > 0) {
-    const firstLine = lines[0];
-    // Check if first line is all uppercase letters (could be "DANISHALI" or "DANISH ALI")
-    if (
-      firstLine === firstLine.toUpperCase() &&
-      /^[A-Z]+$/.test(firstLine.replace(/\s/g, '')) &&
-      !/RESUME|CURRICULUM|VITAE|CV/.test(firstLine) // avoid picking "RESUME" etc. as name
-    ) {
-      // If it's a single word, try to split it intelligently (e.g., "DANISHALI" -> "DANISH ALI")
-      if (firstLine.length > 5 && firstLine.length < 30) {
-        // Try to detect if it's two names combined (common pattern)
-        // Look for patterns like "DANISHALI" where we can split
-        const splitPattern = /^([A-Z]{3,})([A-Z]{3,})$/;
-        const splitMatch = firstLine.match(splitPattern);
-        if (splitMatch) {
-          data.name = `${splitMatch[1]} ${splitMatch[2]}`;
-          console.log(`✓ Name found (all caps single word, split): "${data.name}"`);
-        } else {
-          data.name = firstLine;
-          console.log(`✓ Name found (all caps first line): "${data.name}"`);
+    for (let i = 0; i < Math.min(15, lines.length); i++) {
+      const firstLine = lines[i];
+      
+      // Skip if it's a section header
+      if (isSectionHeader(firstLine)) {
+        console.log(`   Skipping section header: "${firstLine}"`);
+        continue;
+      }
+      
+      // Check if first line is all uppercase letters (could be "DANISHALI" or "DANISH ALI")
+      if (
+        firstLine === firstLine.toUpperCase() &&
+        /^[A-Z]+$/.test(firstLine.replace(/\s/g, '')) &&
+        !/RESUME|CURRICULUM|VITAE|CV/.test(firstLine) // avoid picking "RESUME" etc. as name
+      ) {
+        // If it's a single word, try to split it intelligently (e.g., "DANISHALI" -> "DANISH ALI")
+        if (firstLine.length > 5 && firstLine.length < 30) {
+          // Try to detect if it's two names combined (common pattern)
+          // Look for patterns like "DANISHALI" where we can split
+          const splitPattern = /^([A-Z]{3,})([A-Z]{3,})$/;
+          const splitMatch = firstLine.match(splitPattern);
+          if (splitMatch) {
+            data.name = `${splitMatch[1]} ${splitMatch[2]}`;
+            console.log(`✓ Name found (all caps single word, split): "${data.name}"`);
+          } else {
+            data.name = firstLine;
+            console.log(`✓ Name found (all caps first line): "${data.name}"`);
+          }
+          break;
         }
       }
     }
@@ -95,8 +125,15 @@ function extractResumeData(text) {
 
   // Strategy 2b: Look for all-caps name with spaces at the start
   if (!data.name) {
-    for (let i = 0; i < Math.min(5, lines.length); i++) {
+    for (let i = 0; i < Math.min(15, lines.length); i++) {
       const line = lines[i];
+      
+      // Skip section headers
+      if (isSectionHeader(line)) {
+        console.log(`   Skipping section header: "${line}"`);
+        continue;
+      }
+      
       // Check if line is all uppercase and 2-4 words
       if (
         line === line.toUpperCase() &&
@@ -117,8 +154,15 @@ function extractResumeData(text) {
 
   // Strategy 3: Look for capitalized words at the start (2-4 words, all capitalized)
   if (!data.name) {
-    for (let i = 0; i < Math.min(10, lines.length); i++) {
+    for (let i = 0; i < Math.min(15, lines.length); i++) {
       const line = lines[i];
+      
+      // Skip section headers
+      if (isSectionHeader(line)) {
+        console.log(`   Skipping section header: "${line}"`);
+        continue;
+      }
+      
       if (/resume|curriculum|vitae|cv/i.test(line)) continue; // skip obvious non-name titles
       const words = line.split(/\s+/);
       
@@ -381,11 +425,11 @@ function extractResumeData(text) {
   // ========== EXTRACT ROLE/POSITION ==========
   console.log('🔍 Extracting role/position...');
   const rolePatterns = [
-    /(?:current\s*role|position|job\s*title|designation|role|title)\s*[:]?\s*([A-Za-z\s&]+(?:engineer|developer|scientist|analyst|manager|architect|specialist|consultant|lead|senior|junior|associate))/gi,
+    /(?:current\s*role|position|job\s*title|designation|role|title)\s*[:]??\s*([A-Za-z\s&]+(?:engineer|developer|scientist|analyst|manager|architect|specialist|consultant|lead|senior|junior|associate))/gi,
     /(?:software\s*engineer|data\s*scientist|full\s*stack|frontend|backend|devops|ml\s*engineer|ai\s*engineer|web\s*developer|mobile\s*developer)/gi,
     /(?:senior|junior|lead|principal)\s*(?:software\s*)?(?:engineer|developer|scientist|analyst|architect)/gi
   ];
-  
+    
   // Common roles to look for
   const commonRoles = [
     'Software Engineer', 'Software Developer', 'Full Stack Developer',
@@ -395,13 +439,13 @@ function extractResumeData(text) {
     'Product Manager', 'Project Manager', 'Tech Lead', 'Senior Engineer',
     'Junior Engineer', 'Associate Engineer'
   ];
-  
+    
   // First, try to find explicit role labels
   for (const pattern of rolePatterns) {
     const matches = originalText.match(pattern);
     if (matches && matches.length > 0) {
       // Take the first match and clean it up
-      let role = matches[0].replace(/(?:current\s*role|position|job\s*title|designation|role|title)\s*[:]?\s*/gi, '').trim();
+      let role = matches[0].replace(/(?:current\s*role|position|job\s*title|designation|role|title)\s*[:]??\s*/gi, '').trim();
       if (role.length > 3 && role.length < 50) {
         // Capitalize properly
         role = role.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
@@ -411,7 +455,7 @@ function extractResumeData(text) {
       }
     }
   }
-  
+    
   // If not found, search for common role keywords
   if (!data.role) {
     const textLower = originalText.toLowerCase();
@@ -425,31 +469,38 @@ function extractResumeData(text) {
       }
     }
   }
-  
-  // If still not found, look for "Engineer", "Developer", "Scientist" etc. in first few lines
+    
+  // If still not found, look for job titles near the name (within first 15 lines)
   if (!data.role) {
+    const jobTitleKeywords = [
+      'engineer', 'developer', 'designer', 'manager', 'analyst',
+      'architect', 'consultant', 'specialist', 'coordinator',
+      'director', 'lead', 'senior', 'junior', 'intern'
+    ];
+      
     for (let i = 0; i < Math.min(15, lines.length); i++) {
       const line = lines[i].toLowerCase();
-      if (line.includes('engineer') || line.includes('developer') || line.includes('scientist') || 
-          line.includes('analyst') || line.includes('architect') || line.includes('manager')) {
-        // Try to extract a meaningful role from this line
-        const words = lines[i].split(/\s+/);
-        const roleWords = [];
-        for (const word of words) {
-          if (word.length > 2 && /^[A-Za-z]+$/.test(word)) {
-            roleWords.push(word);
-            if (word.toLowerCase().includes('engineer') || word.toLowerCase().includes('developer') || 
-                word.toLowerCase().includes('scientist') || word.toLowerCase().includes('analyst')) {
+        
+      // Skip section headers
+      if (isSectionHeader(lines[i])) continue;
+        
+      for (const keyword of jobTitleKeywords) {
+        if (line.includes(keyword) && lines[i].length < 60) {
+          // This line might contain a job title
+          const words = lines[i].split(/\s+/);
+          // Try to extract a meaningful title (2-5 words)
+          if (words.length >= 2 && words.length <= 5) {
+            const potentialTitle = lines[i].trim();
+            // Avoid contact info, locations, etc.
+            if (!potentialTitle.includes('@') && !/^\d+$/.test(potentialTitle.replace(/\D/g, ''))) {
+              data.role = potentialTitle;
+              console.log(`✓ Role found (near name, line ${i}): "${data.role}"`);
               break;
             }
           }
         }
-        if (roleWords.length > 0 && roleWords.length < 5) {
-          data.role = roleWords.join(' ');
-          console.log(`✓ Role found (keyword search): "${data.role}"`);
-          break;
-        }
       }
+      if (data.role) break;
     }
   }
 
@@ -647,13 +698,38 @@ function extractResumeData(text) {
       .map(t => t.trim())
       .filter(t => t.length > 1 && t.length <= 60);
 
+    // Filter out obvious non-skill items
     const cleaned = Array.from(new Set(
       rawTokens.map(t => t.replace(/^[•\-–]+/, '').trim())
     )).filter(t => {
       const lower = t.toLowerCase();
-      // Filter out obvious non-skill phrases
+      
+      // Filter out section headers
       if (lower.startsWith('experience') || lower.startsWith('education') || lower.startsWith('summary')) return false;
       if (/\byears?\b/.test(lower)) return false;
+      
+      // Filter out contact information patterns
+      if (/^\d{10}$/.test(t.replace(/\s/g, ''))) return false; // phone numbers
+      if (t.includes('@') && t.includes('.')) return false; // emails
+      if (/^[A-Za-z\s]+\([^)]+\)$/.test(t)) return false; // location with parentheses
+      
+      // Filter out generic resume phrases
+      const genericPhrases = [
+        'bachelor', 'master', 'degree', 'university', 'college',
+        'company', 'inc', 'ltd', 'corporation',
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december',
+        'present', 'current', 'full-time', 'part-time'
+      ];
+      
+      if (genericPhrases.some(phrase => lower.includes(phrase))) return false;
+      
+      // Must contain at least one capital letter or be a known tech term
+      const hasCapital = /[A-Z]/.test(t);
+      const isCommonTech = /^(html|css|js|ts|sql|aws|azure|gcp|figma|xd|react|vue|angular|node|npm|git)$/i.test(t);
+      
+      if (!hasCapital && !isCommonTech) return false;
+      
       return true;
     });
 

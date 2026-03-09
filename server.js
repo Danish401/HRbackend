@@ -111,10 +111,9 @@ const connectWithRetry = () => {
     try {
       smsService.initBirthdayTask();
     } catch (err) {
-      console.error('⚠️ Birthday task failed to start:', err.message);
+      console.error("⚠️ Birthday task failed to start:", err.message);
     }
-
-    
+        
     console.log('✅ Background services initiated (running in background)');
   })
   .catch(err => {
@@ -157,7 +156,10 @@ const dailyOutlookRoutes = require('./routes/dailyOutlookRoutes');
 const emailService = require('./services/emailService');
 const smsService = require('./services/smsService');
 const { authenticate } = require('./middleware/auth');
-const redisService = require('./services/redisService');
+
+// Import new enhanced pipeline routes
+const enhancedResumeUpload = require('./routes/enhancedResumeUpload');
+const reviewRoutes = require('./routes/reviewRoutes');
 
 // Public routes (no authentication required)
 app.use('/api/auth', authRoutes);
@@ -175,8 +177,13 @@ app.use('/api/emails', authenticate, emailRoutes);
 app.use('/api/notifications', authenticate, notificationRoutes);
 app.use('/api/outlook', authenticate, dailyOutlookRoutes);
 
+// New Enhanced Pipeline Routes (with authentication)
+app.use('/api/resume-upload', authenticate, enhancedResumeUpload);
+app.use('/api/review', authenticate, reviewRoutes);
+
 // Debug: Log route registration
-console.log('📋 Registered routes:');
+console.log('\n📋 Registered routes:');
+console.log('   === Legacy Routes ===');
 console.log('   POST /api/resumes/upload - File upload');
 console.log('   GET  /api/resumes - Get all resumes');
 console.log('   GET  /api/resumes/stats/count - Get count');
@@ -184,6 +191,16 @@ console.log('   GET  /api/resumes/test-upload-route - Test route');
 console.log('   GET  /api/resumes/download/:id - Download PDF');
 console.log('   GET  /api/resumes/:id - Get single resume');
 console.log('   DELETE /api/resumes/:id - Delete resume');
+console.log('\n   === Enhanced Pipeline Routes ===');
+console.log('   POST /api/resume-upload/pipeline - Upload with AI processing');
+console.log('   GET  /api/resume-upload/stats - Processing statistics');
+console.log('   GET  /api/review/resumes - Get resumes needing review');
+console.log('   GET  /api/review/resumes/:id - Get specific resume');
+console.log('   PUT  /api/review/resumes/:id/approve - Approve resume');
+console.log('   PUT  /api/review/resumes/:id/reject - Reject resume');
+console.log('   PUT  /api/review/resumes/:id/update - Update extracted data');
+console.log('   GET  /api/review/stats - Review statistics');
+console.log('   DELETE /api/review/resumes/:id - Delete resume\n');
 
 // Socket.io connection
 io.on('connection', (socket) => {
@@ -196,35 +213,6 @@ io.on('connection', (socket) => {
 
 // Make io accessible to email service
 app.set('io', io);
-
-// Debug middleware to log all requests (before routes)
-app.use((req, res, next) => {
-  if (req.path.includes('/upload') || req.path.includes('/api/resumes') || req.path.includes('/download')) {
-    console.log(`🔍 Incoming Request: ${req.method} ${req.path} | Original: ${req.originalUrl}`);
-  }
-  next();
-});
-
-// Initialize Redis (non-blocking, with timeout)
-const initRedisWithTimeout = async () => {
-  const timeout = new Promise((_, reject) => 
-    setTimeout(() => reject(new Error('Redis initialization timeout')), 5000)
-  );
-  
-  try {
-    await Promise.race([
-      redisService.initializeRedis(),
-      timeout
-    ]);
-    console.log('✅ Redis initialized');
-  } catch (err) {
-    console.warn('⚠️ Redis initialization failed, continuing without Redis:', err.message);
-  }
-};
-
-initRedisWithTimeout();
-
-// NOTE: Removed unused queue processor since no actual job processing logic was implemented
 
 // Health check
 app.get('/api/health', (req, res) => {

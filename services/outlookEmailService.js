@@ -1,7 +1,6 @@
 const { Client } = require('@microsoft/microsoft-graph-client');
 const msal = require('@azure/msal-node');
 const Email = require('../models/Resume');
-const redisService = require('./redisService');
 const { processPdfAttachment } = require('./emailService');
 const { checkDuplicateAndPrepare, linkResumeToCandidate } = require('./deduplicationService');
 require('dotenv').config();
@@ -184,18 +183,7 @@ async function isEmailProcessedToday(emailId, receivedDate) {
     return false;
   }
 
-  // Check if email was already processed today
-  try {
-    const isProcessed = await redisService.isEmailProcessed(emailId);
-    if (isProcessed) {
-      return true;
-    }
-  } catch (err) {
-    // Fallback to DB check if Redis fails
-    console.warn('Redis check failed, falling back to DB check:', err.message);
-  }
-
-  // Check in database if email exists and was received today
+  // Check if email was already processed today (using DB only since Redis removed)
   const existingEmail = await Email.findOne({ 
     emailId: emailId,
     receivedAt: {
@@ -211,11 +199,7 @@ async function isEmailProcessedToday(emailId, receivedDate) {
  * Mark email as processed today
  */
 async function markEmailAsProcessed(emailId) {
-  try {
-    await redisService.markEmailProcessed(emailId);
-  } catch (error) {
-    console.warn(`⚠️ Could not mark ${emailId} in Redis: ${error.message}`);
-  }
+  // Redis removed - no-op now
 }
 
 /**

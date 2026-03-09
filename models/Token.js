@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const tokenSchema = new mongoose.Schema({
   accountEmail: { type: String, required: true, unique: true },
   accessToken: { type: String, required: true },
-  refreshToken: { type: String, required: true },
+  refreshToken: { type: String }, // Optional - some OAuth flows don't provide refresh tokens
   expiresAt: { type: Date, required: true },
   updatedAt: { type: Date, default: Date.now }
 });

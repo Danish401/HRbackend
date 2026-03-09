@@ -8,10 +8,21 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024 // 5MB per resume
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype !== 'application/pdf') {
-      return cb(new Error('Only PDF files allowed'));
+    // Allow PDF, DOCX, and image files
+    const allowedMimeTypes = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/msword',
+      'image/jpeg',
+      'image/png',
+      'image/jpg'
+    ];
+    
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Unsupported file type: ${file.mimetype}. Allowed types: PDF, DOCX, JPG, PNG`));
     }
-    cb(null, true);
   }
 });
 
